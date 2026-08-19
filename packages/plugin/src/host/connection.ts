@@ -10,6 +10,20 @@ import {
   parseClientFrame,
   type KnownClientFrame,
 } from '@agent-colosseum/protocol'
+import {
+  assertRequestLimits,
+  newInferenceId,
+  type GrantV1,
+} from '@agent-colosseum/protocol'
+import {
+  measureGenerateOptions,
+  requestHashOf,
+  sealWinnerRequest,
+  openWinnerRequest,
+  ownerRoutedOptions,
+} from './grant-relay.ts'
+import type { GenerateOptions, StreamChunk } from './llm-adapter.ts'
+import { deriveSharedKey, openJson, relayAad, sealJson } from '@agent-colosseum/crypto'
 import type { SnapshotStore } from './snapshot-store.ts'
 
 export class ArenaConnection {
@@ -18,6 +32,9 @@ export class ArenaConnection {
   private closed = false
   keys: DeviceKeypair | null = null
   deviceId: string | null = null
+  ownerLlm: { stream(options: GenerateOptions): AsyncIterable<StreamChunk> } | null = null
+  private readonly waiters = new Map<string, (payload: Record<string, unknown>) => void>()
+  private readonly ownerAborts = new Map<string, AbortController>()
 
   constructor(
     private readonly url: string,
@@ -34,6 +51,48 @@ export class ArenaConnection {
   stop(): void {
     this.closed = true
     this.ws?.close()
+  }
+
+  async * streamAsWinner(options: GenerateOptions, grant: GrantV1): AsyncIterable<StreamChunk> {
+    if (!this.keys || !this.deviceId || this.ws?.readyState !== 1) {
+      throw Object.assign(new Error('arena socket is not ready'), { code: 'RELAY_DISCONNECTED' })
+    }
+    const ownerPub = (grant as GrantV1 & { ownerX25519PublicKey?: string }).ownerX25519PublicKey
+    if (!ownerPub) throw new Error('missing owner public key')
+    const inferenceId = newInferenceId()
+    const estimate = measureGenerateOptions(options)
+    assertRequestLimits(estimate, options.maxTokens)
+    const { box } = sealWinnerRequest({
+      winnerPrivate: this.keys.x25519PrivateKey,
+      ownerPublic: ownerPub,
+      grantId: grant.grantId,
+      inferenceId,
+      options,
+    })
+    this.send('relay.reserve', {
+      grantId: grant.grantId,
+      inferenceId,
+      ciphertext: box.ciphertext,
+      nonce: box.nonce,
+      estimatedInputTokens: estimate.estimatedInputTokens,
+      requestBytes: estimate.bytes,
+      requestHash: requestHashOf(options),
+    })
+    await this.waitType('relay.inference_started')
+    const shared = deriveSharedKey(this.keys.x25519PrivateKey, ownerPub)
+    while (true) {
+      if (options.signal?.aborted) {
+        this.send('relay.terminal', { grantId: grant.grantId, inferenceId, status: 'cancelled' })
+        return
+      }
+      const frame = await this.waitType('relay.chunk', 'relay.terminal')
+      if (frame.type === 'relay.terminal') return
+      const seq = Number(frame.payload.seq)
+      yield openJson<StreamChunk>(shared, {
+        nonce: String(frame.payload.nonce),
+        ciphertext: String(frame.payload.ciphertext),
+      }, relayAad({ grantId: grant.grantId, inferenceId, seq, direction: 'owner_to_winner' }))
+    }
   }
 
   send(type: KnownClientFrame['type'], payload: unknown): void {
@@ -103,12 +162,26 @@ export class ArenaConnection {
         const terminal = data.payload.terminal as { winnerDeviceId?: string; reason?: string }
         this.store.patch({
           view: 'result',
-          result: { ...terminal.winnerDeviceId ? { winner: terminal.winnerDeviceId } : {}, reason: terminal.reason },
+          result: {
+            ...terminal.winnerDeviceId ? { winner: terminal.winnerDeviceId } : {},
+            ...terminal.reason ? { reason: terminal.reason } : {},
+          },
         })
         return
       }
       if (data.type === 'grant.updated') {
         this.store.patch({ view: 'grants', grants: [data.payload] })
+      }
+      if (data.type === 'relay.reserve') {
+        void this.fulfillAsOwner(data.payload)
+      }
+      if (data.type === 'relay.abort') {
+        this.ownerAborts.get(`${data.payload.grantId}:${data.payload.inferenceId}`)?.abort()
+      }
+      const waiter = this.waiters.get(data.type)
+      if (waiter) {
+        this.waiters.delete(data.type)
+        waiter(data.payload)
       }
     })
     ws.addEventListener('close', () => {
@@ -122,5 +195,56 @@ export class ArenaConnection {
       if (ws.readyState === ws.OPEN) this.send('session.heartbeat', { at: Date.now() })
     }, HEARTBEAT_INTERVAL_MS)
     ws.addEventListener('close', () => clearInterval(beat))
+  }
+
+  private waitType(...types: string[]): Promise<{ type: string; payload: Record<string, unknown> }> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('relay timeout')), 60_000)
+      for (const type of types) {
+        this.waiters.set(type, (payload) => {
+          clearTimeout(timer)
+          for (const other of types) this.waiters.delete(other)
+          resolve({ type, payload })
+        })
+      }
+    })
+  }
+
+  private async fulfillAsOwner(payload: Record<string, unknown>): Promise<void> {
+    if (!this.ownerLlm || !this.keys) return
+    const grantId = String(payload.grantId)
+    const inferenceId = String(payload.inferenceId)
+    const winnerPub = String(payload.winnerX25519PublicKey ?? '')
+    const abort = new AbortController()
+    this.ownerAborts.set(`${grantId}:${inferenceId}`, abort)
+    try {
+      const opened = openWinnerRequest({
+        ownerPrivate: this.keys.x25519PrivateKey,
+        winnerPublic: winnerPub,
+        grantId,
+        inferenceId,
+        box: { nonce: String(payload.nonce), ciphertext: String(payload.ciphertext) },
+      })
+      this.send('relay.preflight_ok', { grantId, inferenceId, requestHash: requestHashOf(opened) })
+      await this.waitType('relay.inference_started')
+      const grant = (this.store.snapshot.grants as GrantV1[]).find((item) => item.grantId === grantId)
+      if (!grant) throw new Error('GRANT_UNAVAILABLE')
+      const routed = ownerRoutedOptions(grant, opened, abort.signal)
+      const shared = deriveSharedKey(this.keys.x25519PrivateKey, winnerPub)
+      let seq = 1
+      for await (const chunk of this.ownerLlm.stream(routed)) {
+        if (abort.signal.aborted) break
+        const sealed = sealJson(shared, chunk, relayAad({
+          grantId, inferenceId, seq, direction: 'owner_to_winner',
+        }))
+        this.send('relay.chunk', { grantId, inferenceId, seq, ciphertext: sealed.ciphertext, nonce: sealed.nonce })
+        seq += 1
+      }
+      this.send('relay.terminal', { grantId, inferenceId, status: abort.signal.aborted ? 'aborted' : 'completed' })
+    } catch {
+      this.send('relay.terminal', { grantId, inferenceId, status: 'provider_error' })
+    } finally {
+      this.ownerAborts.delete(`${grantId}:${inferenceId}`)
+    }
   }
 }

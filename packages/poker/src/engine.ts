@@ -217,7 +217,13 @@ export class PokerEngine {
       board: boardForStreet(s.street, s.board),
       holes,
       blinds: s.handNo === 0 ? blindsForHand(1) : blindsForHand(s.handNo),
-      lastActions: [...s.lastActions],
+      lastActions: s.lastActions.map((action) => ({
+        seat: action.seat,
+        action: action.action,
+        publicRationale: action.publicRationale,
+        ...action.raiseTo === undefined ? {} : { raiseTo: action.raiseTo },
+        ...action.fault === undefined ? {} : { fault: action.fault },
+      })),
       terminal: s.terminal,
     }
   }

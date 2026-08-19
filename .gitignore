@@ -8,6 +8,7 @@ coverage
 .env.*
 !.env.example
 *.tgz
+!release/*.tgz
 *.log
 .pnpm-store
 deploy/data

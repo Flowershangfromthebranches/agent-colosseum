@@ -54,6 +54,26 @@ function stakeFor(deviceId: string, keys: ReturnType<typeof generateDeviceKeypai
   return { ...unsigned, signature: signStake(keys.ed25519PrivateKey, unsigned) }
 }
 
+describe('config and logs', () => {
+  it('loads env allowlists and hashes invites', async () => {
+    const { loadConfig, isProviderAllowed } = await import('./config.ts')
+    const cfg = loadConfig({
+      ARENA_INVITE_HASHES: 'deadbeef:2',
+      ARENA_PROVIDER_ALLOWLIST: 'openai-compatible',
+      ARENA_HOST: '0.0.0.0',
+      ARENA_PORT: '9',
+      DATABASE_URL: 'postgres://x',
+      REDIS_URL: 'redis://x',
+      ARENA_PUBLIC_BASE_URL: 'https://x',
+    })
+    expect(cfg.inviteHashes.get('deadbeef')?.uses).toBe(2)
+    expect(isProviderAllowed(cfg.providerAllowlist, 'openai-compatible')).toBe(true)
+    const def = loadConfig({})
+    expect(def.port).toBe(8787)
+    expect(def.providerAllowlist).toEqual([])
+  })
+})
+
 describe('allowlist', () => {
   it('defaults to deny', () => {
     expect(isProviderAllowed([], 'deepseek-official')).toBe(false)
@@ -134,6 +154,29 @@ describe('relay', () => {
     const replay = await relay.start(grantId, firstId)
     expect(replay.callsRemaining).toBe(9)
   })
+
+  it('starts at most one of 50 concurrent inferences when concurrency is 1', async () => {
+    const store = new MemoryStore()
+    const grantId = newGrantId()
+    const winner = newDeviceId()
+    await store.saveGrant({
+      grantId, ownerDeviceId: newDeviceId(), winnerDeviceId: winner, model: 'm', provider: 'openai-compatible',
+      callsRemaining: 10, activeConcurrency: 0, onlineMsRemaining: 1000, ownerOnline: true,
+      status: 'active', statusReason: 'active', version: 1, stakeId: 's', lastOnlineTickAt: null,
+    })
+    const relay = new RelayController(store)
+    const ids = Array.from({ length: 50 }, () => newInferenceId())
+    for (const id of ids) {
+      await relay.reserve({
+        grantId, inferenceId: id, winnerDeviceId: winner, requestBytes: 8, requestHash: id, ownerOnline: true,
+      })
+    }
+    const results = await Promise.allSettled(ids.map((id) => relay.start(grantId, id)))
+    expect(results.filter((item) => item.status === 'fulfilled')).toHaveLength(1)
+    expect(results.filter((item) => item.status === 'rejected')).toHaveLength(49)
+    expect((await store.getGrant(grantId))?.callsRemaining).toBe(9)
+    expect((await store.getGrant(grantId))?.activeConcurrency).toBe(1)
+  })
 })
 
 describe('grant ttl', () => {
@@ -161,8 +204,11 @@ describe('presence timers', () => {
     const book = new MemoryPresence()
     book.connect('d', 0)
     expect(book.isOnline('d', 10_000)).toBe(true)
+    book.beat('d', 20_000)
+    expect(book.socketsOf('d')).toBe(1)
     book.disconnect('d')
     expect(book.offlineSince('d', 89_000)).toBeGreaterThan(89_000)
+    expect(book.socketsOf('missing')).toBe(0)
   })
 })
 

@@ -6,6 +6,23 @@ import { genesisHash, nextEventHash, verifyEventChain } from './hash-chain.ts'
 import { commitServerSeed, dealFromDeck, deriveHandDeck, STANDARD_DECK, verifyServerSeed } from './shuffle.ts'
 import { toHex, randomBytes } from './bytes.ts'
 
+describe('stake and entropy signatures', () => {
+  it('signs and verifies stake and entropy payloads', async () => {
+    const { defaultStakeSpec } = await import('@agent-colosseum/protocol')
+    const { signStake, verifyStake, signEntropy, verifyEntropy } = await import('./device-keys.ts')
+    const keys = generateDeviceKeypair()
+    const spec = defaultStakeSpec(uuidv7(), 'openai-compatible', 'm', toHex(randomBytes(16)), 'pending')
+    const signed = { ...spec, signature: signStake(keys.ed25519PrivateKey, spec) }
+    expect(verifyStake(keys.ed25519PublicKey, signed)).toBe(true)
+    expect(verifyStake(keys.ed25519PublicKey, { ...signed, signature: '00' })).toBe(false)
+    const matchId = uuidv7()
+    const entropy = toHex(randomBytes(32))
+    const sig = signEntropy(keys.ed25519PrivateKey, matchId, entropy)
+    expect(verifyEntropy(keys.ed25519PublicKey, matchId, entropy, sig)).toBe(true)
+    expect(verifyEntropy(keys.ed25519PublicKey, matchId, 'ff', sig)).toBe(false)
+  })
+})
+
 describe('identity', () => {
   it('binds signatures to domain, device and nonce', () => {
     const keys = generateDeviceKeypair()

@@ -108,6 +108,12 @@ describe('betting', () => {
     expect(restored.state.street).toBe('flop')
   })
 
+  it('serverFault releases chips without a winner', () => {
+    const { engine } = fresh()
+    expect(engine.serverFault()?.winnerDeviceId).toBeNull()
+    expect(engine.totalChips()).toBe(160)
+  })
+
   it('forfeit and double-disconnect close once', () => {
     const { engine } = fresh()
     const first = engine.forfeit('A')
@@ -147,6 +153,42 @@ describe('odd chip', () => {
     engine.apply('B', 'check')
     engine.apply('A', 'check')
     expect(engine.state.players.A.stack + engine.state.players.B.stack).toBe(160)
+  })
+})
+
+describe('match length', () => {
+  it('continues sudden death when stacks are tied after 20 hands', () => {
+    const { engine, matchId, seed, entropy } = fresh()
+    const state = engine.toState()
+    state.handNo = 20
+    state.street = 'complete'
+    state.toAct = null
+    state.players.A.stack = 80
+    state.players.B.stack = 80
+    state.handCommitted = { A: 0, B: 0 }
+    state.streetCommitted = { A: 0, B: 0 }
+    state.pot = 0
+    state.terminal = null
+    const tied = PokerEngine.fromState(state)
+    expect(tied.maybeFinishMatch()).toBeNull()
+    tied.startHand(deriveHandDeck({ matchId, handNo: 21, serverSeedHex: seed, playerEntropy: entropy }))
+    tied.apply(tied.state.toAct!, 'fold')
+    expect(tied.state.terminal?.reason === 'bust' || tied.state.players.A.stack !== tied.state.players.B.stack).toBe(true)
+  })
+
+  it('ends on chip lead after 20 hands when stacks differ', () => {
+    const { engine } = fresh()
+    const state = engine.toState()
+    state.handNo = 20
+    state.street = 'complete'
+    state.toAct = null
+    state.players.A.stack = 100
+    state.players.B.stack = 60
+    state.handCommitted = { A: 0, B: 0 }
+    state.pot = 0
+    const led = PokerEngine.fromState(state)
+    expect(led.maybeFinishMatch()?.reason).toBe('chip_lead')
+    expect(led.state.terminal?.winnerDeviceId).toBe(led.state.players.A.deviceId)
   })
 })
 

@@ -210,23 +210,25 @@ export class MemoryStore implements ArenaStore {
   async ping() { return true }
 
   async deductIfStarted(grantId: string, inferenceId: string): Promise<GrantRecord> {
-    const grant = this.grants.get(grantId)
-    const inference = this.inferences.get(`${grantId}:${inferenceId}`)
-    if (!grant || !inference) throw new Error('missing')
-    if (inference.deducted) return grant
-    if (grant.callsRemaining <= 0) throw new Error('GRANT_EXHAUSTED')
-    if (grant.activeConcurrency >= 1) throw new Error('CONCURRENCY')
-    grant.callsRemaining -= 1
-    grant.activeConcurrency += 1
-    grant.version += 1
-    if (grant.callsRemaining === 0) {
-      grant.status = 'exhausted'
-      grant.statusReason = 'calls_exhausted'
-    }
-    inference.deducted = true
-    inference.status = 'started'
-    inference.startedAt = Date.now()
-    return grant
+    return this.withLock(`grant:${grantId}`, async () => {
+      const grant = this.grants.get(grantId)
+      const inference = this.inferences.get(`${grantId}:${inferenceId}`)
+      if (!grant || !inference) throw new Error('missing')
+      if (inference.deducted) return grant
+      if (grant.callsRemaining <= 0) throw new Error('GRANT_EXHAUSTED')
+      if (grant.activeConcurrency >= 1) throw new Error('CONCURRENCY')
+      grant.callsRemaining -= 1
+      grant.activeConcurrency += 1
+      grant.version += 1
+      if (grant.callsRemaining === 0) {
+        grant.status = 'exhausted'
+        grant.statusReason = 'calls_exhausted'
+      }
+      inference.deducted = true
+      inference.status = 'started'
+      inference.startedAt = Date.now()
+      return grant
+    })
   }
 
   private async withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {

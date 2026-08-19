@@ -10,7 +10,7 @@ import { ArenaLlmAdapter } from './llm-adapter.ts'
 import { assertCompatible, IncompatibleDshError } from './compat.ts'
 
 function scriptHandle(outputs: Array<{ seq: number; text: string }>): AgentHandleLike {
-  const events: AgentLike['session'] extends infer S ? NonNullable<S>['events'] : never = []
+  const events: NonNullable<AgentLike['session']>['events'] = []
   const agent: AgentLike = {
     session: { events },
     ctx: {
@@ -38,10 +38,16 @@ describe('agent runner', () => {
   it('uses the followup interval and disposes after idle', async () => {
     process.env.DSH_VERSION = '0.1.0-rc.7'
     let disposed = false
+    const followed: unknown[] = []
     const handle = scriptHandle([
       { seq: 1, text: 'not-json' },
       { seq: 2, text: '{"action":"check","publicRationale":"fixed"}' },
     ])
+    const innerFollow = handle.agent.followup.bind(handle.agent)
+    handle.agent.followup = (message) => {
+      followed.push(message)
+      innerFollow(message)
+    }
     handle.dispose = async () => { disposed = true }
     const runner = new ArenaAgentRunner({
       async create({ setup }) {
@@ -70,6 +76,7 @@ describe('agent runner', () => {
       hole: engine.state.holes.B!,
     })
     expect(result.decision.action).toBe('check')
+    expect(followed[0]).toMatchObject({ role: 'user', content: [{ type: 'text' }] })
     await runner.dispose('A')
     expect(disposed).toBe(true)
   })

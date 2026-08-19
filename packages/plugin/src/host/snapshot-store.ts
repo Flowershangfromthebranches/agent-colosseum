@@ -49,8 +49,13 @@ export class SnapshotStore {
   get snapshot(): ArenaSnapshot { return this.value }
   get version(): number { return this.cursor }
 
-  patch(partial: Partial<ArenaSnapshot>): ArenaSnapshot {
-    this.value = { ...this.value, ...partial }
+  patch(partial: Record<string, unknown>): ArenaSnapshot {
+    const next: Record<string, unknown> = { ...this.value }
+    for (const [key, value] of Object.entries(partial)) {
+      if (value === undefined) delete next[key]
+      else next[key] = value
+    }
+    this.value = next as unknown as ArenaSnapshot
     this.cursor += 1
     for (const listener of this.listeners) listener(this.value, this.cursor)
     for (const wait of this.waiters.splice(0)) wait()

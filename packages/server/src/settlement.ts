@@ -35,7 +35,7 @@ export async function settleMatch(store: ArenaStore, input: {
     matchId: input.matchId,
     winnerDeviceId: input.winnerDeviceId,
     reason: input.reason,
-    grant,
+    ...grant ? { grant } : {},
     stakeUpdates,
   })
   return result.grant

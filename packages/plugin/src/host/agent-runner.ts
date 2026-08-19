@@ -2,6 +2,8 @@ import { DECISION_TIMEOUT_MS, MAX_OUTPUT_TOKENS, type AgentDecision } from '@age
 import type { LegalAction, PublicMatchSnapshot, SeatId } from '@agent-colosseum/poker'
 import { MATCH_SYSTEM_PROMPT } from './prompt.ts'
 import { extractDecision, textFromAssistantMessage } from './parse-decision.ts'
+import { createUserMessage } from './user-message.ts'
+import { uuidv7 } from '@agent-colosseum/protocol'
 
 export interface SessionLike {
   events: Array<{ type?: string; seq?: number; data?: { message?: { content?: Array<{ type?: string; text?: string }> } } }>
@@ -46,7 +48,7 @@ export class ArenaAgentRunner {
   async createContestant(input: { key: string; provider: string; model: string; sessionId?: string }): Promise<AgentHandleLike> {
     await this.dispose(input.key)
     const handle = await this.agents.create({
-      sessionId: input.sessionId ?? `arena-${input.key}-${this.now()}`,
+      sessionId: input.sessionId ?? uuidv7(),
       agentOptions: { provider: input.provider, model: input.model, maxTokens: MAX_OUTPUT_TOKENS },
       setup: (agentCtx) => {
         agentCtx.systemPrompt?.suppressRuntimeContext()
@@ -116,11 +118,9 @@ export class ArenaAgentRunner {
   > {
     const seq = lastSeq(handle.agent.session)
     const followedUpAt = this.now()
-    handle.agent.followup({
-      role: 'user',
+    handle.agent.followup(createUserMessage({
       content: [{ type: 'text', text }],
-      source: { kind: 'user' },
-    })
+    }))
     try {
       await withTimeout(handle.agent.whenIdle(), Math.max(0, deadline - this.now()))
       const idleAt = this.now()

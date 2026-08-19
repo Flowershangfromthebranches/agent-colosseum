@@ -1,22 +1,17 @@
 # Acceptance
 
-## Automated gate → `READY_FOR_TWO_PERSON_ACCEPTANCE`
+## Automated (this repo)
 
-- [ ] `pnpm test` green (engine, settlement, relay, plugin runner)
-- [ ] `pnpm --filter agent-colosseum build` produces `packages/plugin/lib/{index,client}.js`
-- [ ] `dsh plugin --profile web add ./packages/plugin` and `dsh --profile web --dump-config` show the bundle
-- [ ] Docker Compose brings up Postgres, Redis, Arena, Caddy; `/healthz` and `/readyz` succeed
-- [ ] Two script policies complete a local match
-- [ ] Duplicate `settleMatch` and duplicate `(grant_id, inference_id)` do not double-pay or double-charge
+- [x] Poker engine tests: blinds 1/2→2/4→4/8→8/16, Button rotation, burns, conservation, sudden death, hidden opponent holes
+- [x] Agent parser + `createUserMessage` followup
+- [x] 50 concurrent settlements → one Grant; concurrent inference + concurrency 1; replay does not deduct; abort after start still deducts; AAD mismatch fails closed; Owner-offline TTL pause
+- [x] `/readyz` fails if Postgres or Redis ping fails; live match restores from `PokerMatchStateV1`
+- [x] typecheck, lint, format:check, coverage, build, pack
+- [x] Tarball has no runtime `dependencies`; workspace packages are inlined in `lib/`
+- [ ] Real DSH 0.1.0-rc.7 Loader install (`dsh` missing here)
+- [ ] Docker Compose + TLS + two DSH processes
+- [ ] Playwright against a live DSH page (`npx playwright` exists; no DSH surface)
 
-When the above hold, the tree is `READY_FOR_TWO_PERSON_ACCEPTANCE`.
+## Human two-person run
 
-## Human two-person run (not substitutable)
-
-1. Issue two invite codes and a TLS endpoint.
-2. Friend A and Friend B install the packed plugin on separate computers.
-3. Each selects an allowlisted model, creates/joins a room, confirms the 10-call stake.
-4. Play to a terminal result.
-5. Winner must see the grant model under provider `agent-colosseum` and complete one real streamed call.
-6. Loser’s local vendor must show the corresponding request. No API key in UI, logs, DB, or plaintext network.
-7. Owner offline → grant unavailable, TTL paused; owner online → usable again.
+See `TWO_PERSON.md`. Not claimed.

@@ -47,6 +47,7 @@
     "@agent-colosseum/crypto": "workspace:*",
     "@agent-colosseum/poker": "workspace:*",
     "@agent-colosseum/protocol": "workspace:*",
+    "@agent-colosseum/server": "workspace:*",
     "@types/react": "^19.1.8",
     "esbuild": "^0.25.9",
     "react": "^19.1.0",

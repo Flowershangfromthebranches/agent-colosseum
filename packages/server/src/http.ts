@@ -16,7 +16,7 @@ export async function buildServer(arena: ArenaService, config: ServerConfig, ext
 
   app.get('/readyz', async (_, reply) => {
     const db = await arena.store.ping()
-    const redis = extras?.redisPing ? await extras.redisPing() : true
+    const redis = extras?.redisPing ? await extras.redisPing() : false
     if (!db || !redis) return reply.code(503).send({ ok: false, db, redis })
     return { ok: true, db, redis }
   })
@@ -65,7 +65,6 @@ export async function buildServer(arena: ArenaService, config: ServerConfig, ext
           return
         }
         if (!deviceId) throw new Error('unauthenticated')
-        if (parsed.type === 'auth.hello') throw new Error('already authenticated')
         await arena.handle(deviceId, parsed)
       } catch (error) {
         logJson('warn', 'ws.error', { message: error instanceof Error ? error.message : 'error' })

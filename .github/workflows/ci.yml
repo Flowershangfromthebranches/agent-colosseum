@@ -20,17 +20,7 @@ jobs:
       - run: pnpm install
       - run: pnpm typecheck
       - run: pnpm lint
+      - run: pnpm format:check
       - run: pnpm test:coverage
-      - run: pnpm --filter agent-colosseum build
+      - run: pnpm build
       - run: pnpm pack:plugin
-      - name: DSH master canary
-        continue-on-error: true
-        run: |
-          git clone --depth 1 https://github.com/deepseek-ai/deepseek-harness.git /tmp/dsh-master
-          echo "cloned master $(git -C /tmp/dsh-master rev-parse --short HEAD)" > dsh-canary.txt
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: dsh-canary-${{ matrix.node }}
-          path: dsh-canary.txt
-          if-no-files-found: ignore

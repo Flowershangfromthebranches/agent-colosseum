@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import { PROTOCOL_VERSION } from './constants.ts'
 import { ProtocolError } from './errors.ts'
 import { parseClientFrame } from './frames.ts'
-import { DeviceId, isUuidV7, newDeviceId, newRoomCode, RoomCode, uuidv7 } from './ids.ts'
+import { DeviceId, InviteCode, isUuidV7, newDeviceId, newInviteCode, newRoomCode, RoomCode, uuidv7 } from './ids.ts'
+import { pokerActionSchema } from './poker-action.ts'
 import { defaultStakeSpec, stakeTermsFingerprint } from './stake.ts'
 
 describe('ids', () => {
@@ -12,6 +13,9 @@ describe('ids', () => {
     expect(() => DeviceId('nope')).toThrow(/UUIDv7/)
     const code = newRoomCode()
     expect(RoomCode(code)).toBe(code)
+    const invite = newInviteCode()
+    expect(InviteCode(invite)).toBe(invite)
+    expect(() => InviteCode('nope')).toThrow()
   })
 })
 
@@ -61,6 +65,38 @@ describe('frames', () => {
       payload: { at: Date.now() },
     })
     expect(frame.type).toBe('session.heartbeat')
+  })
+})
+
+describe('request estimate', () => {
+  it('counts system, messages, tools, stop and call config and rejects oversize', async () => {
+    const { assertRequestLimits, estimateRequest } = await import('./estimate.ts')
+    const small = estimateRequest({
+      system: 'sys',
+      messages: [{ role: 'user', content: 'hi' }],
+      tools: [{ name: 'none' }],
+      stop: ['END'],
+      callConfig: { maxTokens: 16 },
+    })
+    expect(small.bytes).toBeGreaterThan(10)
+    expect(small.estimatedInputTokens).toBeGreaterThan(0)
+    expect(() => assertRequestLimits({ bytes: 70_000, estimatedInputTokens: 1 })).toThrow(/REQUEST_TOO_LARGE/)
+    expect(() => assertRequestLimits({ bytes: 10, estimatedInputTokens: 20_000 })).toThrow(/INPUT_TOO_LARGE/)
+    expect(() => assertRequestLimits({ bytes: 10, estimatedInputTokens: 1 }, 5000)).toThrow(/MAX_TOKENS/)
+  })
+})
+
+describe('poker actions', () => {
+  it('requires raiseTo only on raise', () => {
+    expect(() => pokerActionSchema.parse({
+      matchId: uuidv7(), handNo: 1, actionSeq: 0, action: 'raise', publicRationale: 'x',
+    })).toThrow()
+    expect(() => pokerActionSchema.parse({
+      matchId: uuidv7(), handNo: 1, actionSeq: 0, action: 'fold', raiseTo: 4, publicRationale: 'x',
+    })).toThrow()
+    expect(pokerActionSchema.parse({
+      matchId: uuidv7(), handNo: 1, actionSeq: 0, action: 'fold', publicRationale: 'x',
+    }).action).toBe('fold')
   })
 })
 

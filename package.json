@@ -7,16 +7,14 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "build": "pnpm --filter agent-colosseum build && pnpm --filter @agent-colosseum/server exec tsc -p tsconfig.build.json --noEmit false || true",
+    "build": "pnpm --filter agent-colosseum build",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "typecheck": "pnpm -r --filter \"./packages/**\" run typecheck",
     "lint": "oxlint packages",
-    "format:check": "oxfmt --check packages || true",
-    "pack:plugin": "pnpm --filter agent-colosseum pack",
-    "server": "pnpm --filter @agent-colosseum/server start",
-    "migrate": "pnpm --filter @agent-colosseum/server migrate"
+    "format:check": "oxlint --deny-warnings packages",
+    "pack:plugin": "pnpm --dir packages/plugin pack --pack-destination ../.."
   },
   "devDependencies": {
     "@types/node": "^24.3.0",

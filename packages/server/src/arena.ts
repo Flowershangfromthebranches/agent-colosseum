@@ -157,6 +157,18 @@ export class ArenaService {
       case 'match.action':
         await this.submitAction(deviceId, frame.payload)
         return
+      case 'relay.reserve':
+        await this.forwardReserve(deviceId, frame.payload)
+        return
+      case 'relay.preflight_ok':
+        await this.forwardPreflight(deviceId, frame.payload)
+        return
+      case 'relay.chunk':
+        await this.forwardRelayChunk(deviceId, frame.payload)
+        return
+      case 'relay.terminal':
+        await this.forwardRelayTerminal(deviceId, frame.payload)
+        return
       default:
         throw new Error('UNHANDLED')
     }
@@ -420,7 +432,80 @@ export class ArenaService {
       'match.settled',
       { terminal, grant, serverSeedHex: match.serverSeedHex },
     )
-    if (grant) this.send(grant.winnerDeviceId, 'grant.updated', grant)
+    if (grant) {
+      const owner = await this.store.getDevice(grant.ownerDeviceId)
+      this.send(grant.winnerDeviceId, 'grant.updated', {
+        ...grant,
+        ownerX25519PublicKey: owner?.x25519PublicKey,
+      })
+    }
+  }
+
+  private async forwardReserve(winnerId: string, payload: {
+    grantId: string
+    inferenceId: string
+    ciphertext: string
+    nonce: string
+    estimatedInputTokens: number
+    requestBytes: number
+    requestHash: string
+  }): Promise<void> {
+    const reserved = await this.relay.reserve({
+      grantId: payload.grantId,
+      inferenceId: payload.inferenceId,
+      winnerDeviceId: winnerId,
+      requestBytes: payload.requestBytes,
+      requestHash: payload.requestHash,
+      ownerOnline: this.presence.isOnline((await this.store.getGrant(payload.grantId))!.ownerDeviceId),
+    })
+    const winner = await this.store.getDevice(winnerId)
+    this.send(reserved.grant.ownerDeviceId, 'relay.reserve', {
+      ...payload,
+      winnerDeviceId: winnerId,
+      winnerX25519PublicKey: winner?.x25519PublicKey,
+    })
+    this.send(winnerId, 'relay.reserved', { inferenceId: payload.inferenceId, created: reserved.created })
+  }
+
+  private async forwardPreflight(ownerId: string, payload: {
+    grantId: string
+    inferenceId: string
+    requestHash: string
+  }): Promise<void> {
+    const grant = await this.store.getGrant(payload.grantId)
+    if (!grant || grant.ownerDeviceId !== ownerId) throw new Error('UNAUTHORIZED')
+    await this.relay.preflight(payload.grantId, payload.inferenceId, payload.requestHash)
+    const started = await this.relay.start(payload.grantId, payload.inferenceId)
+    this.send(grant.winnerDeviceId, 'relay.inference_started', { grantId: payload.grantId, inferenceId: payload.inferenceId })
+    this.send(ownerId, 'relay.inference_started', { grantId: payload.grantId, inferenceId: payload.inferenceId })
+    this.send(grant.winnerDeviceId, 'grant.updated', started)
+  }
+
+  private async forwardRelayChunk(fromId: string, payload: {
+    grantId: string
+    inferenceId: string
+    seq: number
+    ciphertext: string
+    nonce: string
+  }): Promise<void> {
+    const grant = await this.store.getGrant(payload.grantId)
+    if (!grant) throw new Error('GRANT_UNAVAILABLE')
+    const dest = fromId === grant.ownerDeviceId ? grant.winnerDeviceId : grant.ownerDeviceId
+    this.send(dest, 'relay.chunk', payload)
+  }
+
+  private async forwardRelayTerminal(fromId: string, payload: {
+    grantId: string
+    inferenceId: string
+    status: 'completed' | 'cancelled' | 'owner_offline' | 'provider_error' | 'aborted'
+  }): Promise<void> {
+    const mapped = payload.status === 'owner_offline' ? 'aborted' as const : payload.status
+    const { grant } = await this.relay.terminal(payload.grantId, payload.inferenceId, mapped)
+    const dest = fromId === grant.ownerDeviceId ? grant.winnerDeviceId : grant.ownerDeviceId
+    this.send(dest, 'relay.terminal', payload)
+    if (fromId === grant.winnerDeviceId && (mapped === 'cancelled' || mapped === 'aborted')) {
+      this.send(grant.ownerDeviceId, 'relay.abort', { grantId: payload.grantId, inferenceId: payload.inferenceId })
+    }
   }
 
   private async recordEvent(matchId: string, payload: unknown): Promise<void> {

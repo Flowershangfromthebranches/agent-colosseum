@@ -1,5 +1,5 @@
 import { PROVIDER_ID, RPC_CHANNEL } from '@agent-colosseum/protocol'
-import { ArenaLlmAdapter } from './host/llm-adapter.ts'
+import { ArenaLlmAdapter, type StreamChunk } from './host/llm-adapter.ts'
 import { handleArenaRpc } from './host/rpc.ts'
 import { ArenaRuntime, type PluginConfig } from './host/runtime.ts'
 
@@ -36,6 +36,7 @@ type HostCtx = {
     registerAdapter(providers: string[], adapter: unknown): (() => void) & { replace(providers: string[]): void }
     listProviders(): Array<{ id: string; name: string }>
     listModels(provider: string): Promise<Array<{ id: string; name: string }>>
+    stream(options: unknown): AsyncIterable<unknown>
   }
   agents: { create(options: unknown): Promise<{ agent: unknown; dispose(): Promise<void> }> }
   connection?: {
@@ -82,12 +83,16 @@ export function apply(ctx: HostCtx, config: Config): void {
 
   ctx.effect(() => {
     void runtime.start()
+    runtime.ownerLlm = {
+      async * stream(options) {
+        yield* ctx.llm.stream(options) as AsyncIterable<StreamChunk>
+      },
+    }
     const adapter = new ArenaLlmAdapter(
       () => runtime.store.snapshot.grants as never,
-      async function* relay() {
-        yield { type: 'finish' as const, reason: { kind: 'error' as const, failure: { code: 'RELAY_UNBOUND', message: 'owner relay is not connected' } } }
-      },
+      (options, grant) => runtime.streamGrant(options, grant),
     )
+    if (runtime.connection) runtime.connection.ownerLlm = runtime.ownerLlm
     const registration = ctx.llm.registerAdapter([PROVIDER_ID], adapter)
     const offGrants = () => runtime.grantListeners.delete(refresh)
     const refresh = () => registration.replace([PROVIDER_ID])

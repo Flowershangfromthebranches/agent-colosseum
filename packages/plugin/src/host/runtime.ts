@@ -1,7 +1,9 @@
-import { PINNED_DSH_VERSION, defaultStakeSpec, uuidv7 } from '@agent-colosseum/protocol'
+import { PINNED_DSH_VERSION, defaultStakeSpec, uuidv7, type GrantV1 } from '@agent-colosseum/protocol'
 import { generateDeviceKeypair, signStake, toHex, randomBytes } from '@agent-colosseum/crypto'
 import { ArenaAgentRunner, type AgentsLike } from './agent-runner.ts'
 import { ArenaConnection } from './connection.ts'
+import { streamGrantThroughOwner, type GrantLedger, type GrantPeer, type OwnerLlm } from './grant-relay.ts'
+import type { GenerateOptions, StreamChunk } from './llm-adapter.ts'
 import { runLocalMatch } from './local-match.ts'
 import { SnapshotStore } from './snapshot-store.ts'
 import { assertCompatible } from './compat.ts'
@@ -18,6 +20,9 @@ export class ArenaRuntime {
   connection: ArenaConnection | null = null
   private localAbort: AbortController | null = null
   readonly grantListeners = new Set<() => void>()
+  ownerLlm: OwnerLlm | null = null
+  ownerPeer: GrantPeer | null = null
+  ledger: GrantLedger | null = null
 
   constructor(
     agents: AgentsLike,
@@ -106,6 +111,46 @@ export class ArenaRuntime {
   setGrants(grants: unknown[]) {
     this.store.patch({ grants })
     for (const listener of this.grantListeners) listener()
+  }
+
+  bindOwner(llm: OwnerLlm, peer: GrantPeer, ledger: GrantLedger): void {
+    this.ownerLlm = llm
+    this.ownerPeer = peer
+    this.ledger = ledger
+  }
+
+  async * streamGrant(options: GenerateOptions, grant: GrantV1): AsyncIterable<StreamChunk> {
+    this.store.patch({ view: 'relay', relay: { grantId: grant.grantId, status: 'reserve' } })
+    if (!this.ownerLlm || !this.ownerPeer || !this.ledger) {
+      if (this.connection) {
+        yield* this.connection.streamAsWinner(options, grant)
+        return
+      }
+      throw Object.assign(new Error('grant relay is disconnected'), { code: 'RELAY_DISCONNECTED' })
+    }
+    const winnerKeys = this.connection?.keys ?? generateDeviceKeypair()
+    const winnerId = this.store.snapshot.deviceId ?? grant.winnerDeviceId
+    try {
+      yield* streamGrantThroughOwner({
+        grant,
+        options,
+        winner: { deviceId: winnerId, keys: winnerKeys },
+        owner: this.ownerPeer,
+        ownerLlm: this.ownerLlm,
+        ledger: this.ledger,
+        ownerOnline: grant.ownerOnline,
+      })
+      this.store.patch({ relay: { grantId: grant.grantId, status: 'completed' } })
+    } catch (error) {
+      this.store.patch({
+        relay: {
+          grantId: grant.grantId,
+          status: 'error',
+          error: error instanceof Error ? error.message : 'relay failed',
+        },
+      })
+      throw error
+    }
   }
 
   async dispose() {

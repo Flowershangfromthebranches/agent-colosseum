@@ -7,6 +7,14 @@ import { scriptDecide, type ScriptKind } from './script-policy.ts'
 
 const POLICIES: ScriptKind[] = ['check-fold', 'call-station', 'min-raise-once']
 
+describe('script policy', () => {
+  it('covers fold and min-raise branches', () => {
+    expect(scriptDecide('call-station', [{ action: 'fold' }], 1).action).toBe('fold')
+    expect(scriptDecide('min-raise-once', [{ action: 'raise', minRaiseTo: 4 }], 1).action).toBe('raise')
+    expect(scriptDecide('min-raise-once', [{ action: 'fold' }], 2).action).toBe('fold')
+  })
+})
+
 describe('properties', () => {
   it('conserves 160 chips across random scripted matches', () => {
     for (let i = 0; i < 25; i++) {
