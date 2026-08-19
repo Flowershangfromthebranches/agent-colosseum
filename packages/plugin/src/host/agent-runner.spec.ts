@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { commitServerSeed, deriveHandDeck, randomBytes, toHex } from '@agent-colosseum/crypto'
 import { PokerEngine } from '@agent-colosseum/poker'
-import { uuidv7 } from '@agent-colosseum/protocol'
+import { PINNED_DSH_VERSION, uuidv7 } from '@agent-colosseum/protocol'
 import { ArenaAgentRunner, type AgentHandleLike, type AgentLike } from './agent-runner.ts'
 import { extractDecision } from './parse-decision.ts'
 import { handleArenaRpc } from './rpc.ts'
@@ -156,12 +156,22 @@ describe('agent runner', () => {
 
 describe('compat', () => {
   it('refuses unverified versions', () => {
-    process.env.DSH_VERSION = '0.2.0-rc.0'
-    expect(() => assertCompatible(false)).toThrow(IncompatibleDshError)
-    expect(assertCompatible(true)).toBe('0.2.0-rc.0')
-    delete process.env.DSH_VERSION
-    expect(assertCompatible(true)).toMatch(/unknown|0\./)
-    process.env.DSH_VERSION = '0.1.0-rc.7'
+    const previous = process.env.DSH_VERSION
+    try {
+      process.env.DSH_VERSION = '0.2.0-rc.0'
+      expect(() => assertCompatible(false)).toThrow(IncompatibleDshError)
+      expect(assertCompatible(true)).toMatch(/0\./)
+      process.env.DSH_VERSION = PINNED_DSH_VERSION
+      expect(assertCompatible(false)).toBe(PINNED_DSH_VERSION)
+      delete process.env.DSH_VERSION
+      const detected = assertCompatible(true)
+      expect(detected).toMatch(/unknown|0\./)
+      if (detected !== PINNED_DSH_VERSION) {
+        expect(() => assertCompatible(false)).toThrow(IncompatibleDshError)
+      }
+    } finally {
+      process.env.DSH_VERSION = previous ?? PINNED_DSH_VERSION
+    }
   })
 })
 

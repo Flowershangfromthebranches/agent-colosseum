@@ -158,4 +158,22 @@ describe('runtime rpc and grant stream', () => {
     rt.connection?.stop()
     vi.unstubAllGlobals()
   })
+
+  it('synthesizes an accept stake and covers rpc fallbacks', async () => {
+    const rt = runtime()
+    expect(() => rt.acceptRoom()).toThrow(/no room/)
+    rt.store.patch({
+      roomId: '11111111-1111-7111-8111-111111111111',
+      models: [{ provider: 'openai-compatible', model: 'local', name: 'local', allowedForStake: true }],
+    })
+    expect(rt.acceptRoom().roomId).toBe('11111111-1111-7111-8111-111111111111')
+    expect((await handleArenaRpc(rt, 'grants.stream', {})).ok).toBe(false)
+    expect((await handleArenaRpc(rt, 'events.poll', {})).ok).toBe(true)
+    const throwing = runtime()
+    throwing.redeemGrant = async () => {
+      throw 'relay-down'
+    }
+    const failed = await handleArenaRpc(throwing, 'grants.stream', {})
+    expect(failed).toEqual({ ok: false, error: { code: 'internal', message: 'relay-down' } })
+  })
 })
