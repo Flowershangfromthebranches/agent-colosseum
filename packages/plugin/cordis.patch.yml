@@ -1,7 +1,7 @@
 - insert:
     - id: agent-colosseum
       name: agent-colosseum
-      inject: [llm, agents]
+      inject: [llm, agents, credentials]
       config:
         serverUrl: !!js process.env.ARENA_URL ?? 'wss://127.0.0.1:8787/v1/ws'
         inviteCode: !!js process.env.ARENA_INVITE_CODE ?? ''

@@ -50,6 +50,9 @@ describe('host apply', () => {
         const dispose = fn()
         return dispose
       },
+      inject(_deps: string[], callback: (inner: typeof ctx) => void) {
+        callback(ctx)
+      },
     }
     let dispose: (() => void) | undefined
     ctx.effect = (fn: () => () => void) => {
@@ -67,7 +70,7 @@ describe('host apply', () => {
     dispose?.()
   })
 
-  it('applies without optional connection or credentials', () => {
+  it('applies when connection is not yet present', () => {
     const ctx = {
       llm: {
         registerAdapter() {
@@ -78,9 +81,11 @@ describe('host apply', () => {
         async * stream() {},
       },
       agents: { async create() { return { agent: { ctx: {}, followup() {}, async whenIdle() {} }, async dispose() {} } } },
+      credentials: { async resolve() { return undefined }, async set() {} },
       effect(fn: () => () => void) {
         return fn()
       },
+      inject() {},
     }
     expect(() => apply(ctx as never, { serverUrl: '', inviteCode: '', allowUnverifiedDsh: true })).not.toThrow()
   })

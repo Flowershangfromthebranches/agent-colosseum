@@ -33,6 +33,10 @@ export class ArenaLlmAdapter {
     return { id: provider, name: 'Agent Colosseum Grant' }
   }
 
+  providerRetryPolicy(_provider: string) {
+    return undefined
+  }
+
   async listModels(_provider: string) {
     return this.grants()
       .filter((grant) => grant.status === 'active' && grant.callsRemaining > 0)

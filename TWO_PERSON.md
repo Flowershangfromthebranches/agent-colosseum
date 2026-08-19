@@ -11,8 +11,10 @@ on a public WSS host). Do **not** treat this document as acceptance.
 ## On each computer (DSH 0.1.0-rc.7)
 
 ```sh
-dsh plugin --profile web add ./agent-colosseum-0.1.0-alpha.1.tgz
-dsh plugin --profile desktop add ./agent-colosseum-0.1.0-alpha.1.tgz
+# DSH profiles are pnpm workspaces; -w is required so the tarball is added
+# to the profile root (without it, pnpm 11 refuses ADDING_TO_ROOT).
+dsh plugin --profile web add -w ./agent-colosseum-0.1.0-alpha.1.tgz
+dsh plugin --profile desktop add -w ./agent-colosseum-0.1.0-alpha.1.tgz
 dsh --profile web --dump-config   # must include "# == agent-colosseum"
 ```
 

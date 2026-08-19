@@ -4,7 +4,7 @@ import { handleArenaRpc } from './host/rpc.ts'
 import { ArenaRuntime, type PluginConfig } from './host/runtime.ts'
 
 export const name = 'agent-colosseum'
-export const inject = ['llm', 'agents']
+export const inject = ['llm', 'agents', 'credentials']
 
 export interface Config extends PluginConfig {}
 
@@ -48,11 +48,12 @@ type HostCtx = {
       ): () => Promise<void>
     }
   }
-  credentials?: {
+  credentials: {
     resolve(ref: unknown): Promise<{ value: string } | undefined>
     set(ref: unknown, value: string): Promise<void>
   }
   effect(fn: () => (() => void) | void, label?: string): () => void
+  inject(deps: string[], callback: (ctx: HostCtx) => void): void
 }
 
 export function apply(ctx: HostCtx, config: Config): void {
@@ -76,9 +77,13 @@ export function apply(ctx: HostCtx, config: Config): void {
       }
       return models
     },
-    ctx.credentials
-      ? { resolve: async (ref) => ctx.credentials!.resolve(ref), set: async (ref, value) => ctx.credentials!.set(ref, value) }
-      : undefined,
+    (() => {
+      const credentials = ctx.credentials
+      return {
+        resolve: async (ref: string) => credentials.resolve(ref),
+        set: async (ref: string, value: string) => credentials.set(ref, value),
+      }
+    })(),
   )
 
   ctx.effect(() => {
@@ -97,18 +102,24 @@ export function apply(ctx: HostCtx, config: Config): void {
     const offGrants = () => runtime.grantListeners.delete(refresh)
     const refresh = () => registration.replace([PROVIDER_ID])
     runtime.grantListeners.add(refresh)
-    const offRpc = ctx.connection?.rpc.handle(
-      RPC_CHANNEL,
-      async (endpoint, payload) => handleArenaRpc(runtime, endpoint, payload),
-      { authority: 'trusted-host' },
-    )
     return () => {
       offGrants()
       registration()
-      void offRpc?.()
       void runtime.dispose()
     }
   }, 'agent-colosseum: host')
+
+  ctx.inject(['connection'], (connCtx) => {
+    connCtx.effect(() => {
+      if (runtime.connection) runtime.connection.ownerLlm = runtime.ownerLlm
+      const offRpc = connCtx.connection?.rpc.handle(
+        RPC_CHANNEL,
+        async (endpoint, payload) => handleArenaRpc(runtime, endpoint, payload),
+        { authority: 'trusted-host' },
+      )
+      return () => { void offRpc?.() }
+    }, 'agent-colosseum: connection rpc')
+  })
 }
 
 export { ArenaRuntime } from './host/runtime.ts'

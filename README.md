@@ -24,8 +24,8 @@ This product is not DeepSeek, does not take deposits, and does not convert grant
 Publish or pack the plugin, then:
 
 ```sh
-dsh plugin --profile web add agent-colosseum
-dsh plugin --profile desktop add agent-colosseum
+dsh plugin --profile web add -w agent-colosseum
+dsh plugin --profile desktop add -w agent-colosseum
 dsh --profile web --dump-config   # look for "# == agent-colosseum"
 ```
 

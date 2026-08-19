@@ -1,4 +1,5 @@
 node_modules
+.e2e-dsh
 dist
 lib
 coverage

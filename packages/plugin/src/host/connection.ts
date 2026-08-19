@@ -1,8 +1,13 @@
 import {
   generateDeviceKeypair,
+  randomBytes,
+  signEntropy,
   signUtf8,
+  toHex,
   type DeviceKeypair,
 } from '@agent-colosseum/crypto'
+import type { SeatId } from '@agent-colosseum/poker'
+import type { ArenaAgentRunner } from './agent-runner.ts'
 import {
   HEARTBEAT_INTERVAL_MS,
   PROTOCOL_VERSION,
@@ -33,6 +38,11 @@ export class ArenaConnection {
   keys: DeviceKeypair | null = null
   deviceId: string | null = null
   ownerLlm: { stream(options: GenerateOptions): AsyncIterable<StreamChunk> } | null = null
+  runner: ArenaAgentRunner | null = null
+  agentKey = 'online'
+  private hole: [string, string] | null = null
+  private seat: SeatId | null = null
+  private matchId: string | null = null
   private readonly waiters = new Map<string, (payload: Record<string, unknown>) => void>()
   private readonly ownerAborts = new Map<string, AbortController>()
 
@@ -51,6 +61,11 @@ export class ArenaConnection {
   stop(): void {
     this.closed = true
     this.ws?.close()
+  }
+
+  bindContestant(runner: ArenaAgentRunner, key = 'online'): void {
+    this.runner = runner
+    this.agentKey = key
   }
 
   async * streamAsWinner(options: GenerateOptions, grant: GrantV1): AsyncIterable<StreamChunk> {
@@ -93,6 +108,68 @@ export class ArenaConnection {
         ciphertext: String(frame.payload.ciphertext),
       }, relayAad({ grantId: grant.grantId, inferenceId, seq, direction: 'owner_to_winner' }))
     }
+  }
+
+  private async submitEntropy(matchId: string): Promise<void> {
+    if (!this.keys) return
+    this.matchId = matchId
+    const entropyHex = toHex(randomBytes(32))
+    this.send('match.entropy', {
+      matchId,
+      entropyHex,
+      signature: signEntropy(this.keys.ed25519PrivateKey, matchId, entropyHex),
+    })
+  }
+
+  private ingestSnapshot(payload: Record<string, unknown>): void {
+    this.store.patch({ view: 'table', match: payload })
+    const matchId = payload.matchId
+    if (typeof matchId === 'string') this.matchId = matchId
+    const holes = payload.holes as Partial<Record<SeatId, [string, string]>> | undefined
+    if (holes?.A && !holes.B) {
+      this.seat = 'A'
+      this.hole = holes.A
+    } else if (holes?.B && !holes.A) {
+      this.seat = 'B'
+      this.hole = holes.B
+    }
+  }
+
+  private async playAction(payload: Record<string, unknown>): Promise<void> {
+    if (!this.runner || !this.seat || !this.hole || !this.matchId) return
+    const legal = (payload.legal ?? []) as Array<{ action: 'fold' | 'check' | 'call' | 'raise'; minRaiseTo?: number; maxRaiseTo?: number }>
+    const snapshot = {
+      matchId: this.matchId,
+      handNo: Number(payload.handNo ?? 1),
+      actionSeq: Number(payload.actionSeq ?? 0),
+      street: 'preflop' as const,
+      button: 'A' as const,
+      seats: { A: { deviceId: '', stack: 0, streetCommitted: 0 }, B: { deviceId: '', stack: 0, streetCommitted: 0 } },
+      pot: 0,
+      currentBet: 0,
+      toAct: this.seat,
+      board: [],
+      holes: { [this.seat]: this.hole },
+      blinds: { small: 1, big: 2 },
+      lastActions: [],
+      terminal: null,
+      ...(this.store.snapshot.match ?? {}),
+      legal,
+    }
+    const decided = await this.runner.decide({
+      key: this.agentKey,
+      snapshot,
+      seat: this.seat,
+      hole: this.hole,
+    })
+    this.send('match.action', {
+      matchId: this.matchId,
+      handNo: Number(payload.handNo),
+      actionSeq: Number(payload.actionSeq),
+      action: decided.decision.action,
+      publicRationale: decided.decision.publicRationale,
+      ...decided.decision.raiseTo === undefined ? {} : { raiseTo: decided.decision.raiseTo },
+    })
   }
 
   send(type: KnownClientFrame['type'], payload: unknown): void {
@@ -154,8 +231,16 @@ export class ArenaConnection {
         })
         return
       }
+      if (data.type === 'match.proposal') {
+        void this.submitEntropy(String(data.payload.matchId))
+        return
+      }
       if (data.type === 'match.private' || data.type === 'match.public') {
-        this.store.patch({ view: 'table', match: data.payload })
+        this.ingestSnapshot(data.payload)
+        return
+      }
+      if (data.type === 'match.action_request') {
+        void this.playAction(data.payload)
         return
       }
       if (data.type === 'match.settled') {

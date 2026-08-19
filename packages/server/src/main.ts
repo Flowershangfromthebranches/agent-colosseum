@@ -10,7 +10,12 @@ import { buildServer } from './http.ts'
 import { logJson } from './log.ts'
 import { PostgresStore } from './postgres.ts'
 
-const here = dirname(fileURLToPath(import.meta.url))
+const here = (() => {
+  try {
+    if (import.meta.url) return dirname(fileURLToPath(import.meta.url))
+  } catch { /* bundled CJS has no import.meta.url */ }
+  return process.cwd()
+})()
 
 export async function migrate(pool: pg.Pool): Promise<void> {
   await pool.query('SELECT pg_advisory_lock(87231001)')
@@ -30,7 +35,13 @@ export async function startArena(env: NodeJS.ProcessEnv = process.env): Promise<
     throw new Error('DATABASE_URL, REDIS_URL and ARENA_PUBLIC_BASE_URL are required')
   }
   const pool = new pg.Pool({ connectionString: config.databaseUrl })
+  pool.on('error', (error) => {
+    logJson('error', 'pg.idle', { message: error instanceof Error ? error.message : 'pg' })
+  })
   const redis = new Redis(config.redisUrl)
+  redis.on('error', (error) => {
+    logJson('error', 'redis.idle', { message: error instanceof Error ? error.message : 'redis' })
+  })
   await migrate(pool)
   for (const [hash, { uses }] of config.inviteHashes) {
     await pool.query(
@@ -60,7 +71,17 @@ async function main(): Promise<void> {
   await startArena()
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+const launchedDirectly = Boolean(
+  process.argv[1]
+  && (
+    process.argv[1].endsWith('/main.ts')
+    || process.argv[1].endsWith('/main.js')
+    || process.argv[1].endsWith('/main.cjs')
+    || (import.meta.url !== undefined && import.meta.url === `file://${process.argv[1]}`)
+  ),
+)
+
+if (launchedDirectly) {
   main().catch((error) => {
     logJson('error', 'arena.fatal', { message: error instanceof Error ? error.message : 'fatal' })
     process.exit(1)

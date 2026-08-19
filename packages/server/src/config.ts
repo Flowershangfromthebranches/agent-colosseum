@@ -1,3 +1,5 @@
+import { sha256Hex } from './hash.ts'
+
 export interface ServerConfig {
   host: string
   port: number
@@ -13,6 +15,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   for (const item of (env.ARENA_INVITE_HASHES ?? '').split(',').map((part) => part.trim()).filter(Boolean)) {
     const [hash, uses] = item.split(':')
     if (hash) inviteHashes.set(hash, { uses: Number(uses ?? 1) })
+  }
+  const defaultUses = Number(env.ARENA_INVITE_USES ?? 8)
+  for (const code of (env.ARENA_INVITE_CODES ?? '').split(',').map((part) => part.trim()).filter(Boolean)) {
+    inviteHashes.set(sha256Hex(code), { uses: defaultUses })
   }
   return {
     host: env.ARENA_HOST ?? '0.0.0.0',

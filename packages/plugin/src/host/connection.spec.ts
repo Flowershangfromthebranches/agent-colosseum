@@ -53,6 +53,60 @@ describe('ArenaConnection', () => {
     vi.unstubAllGlobals()
   })
 
+  it('signs shuffle entropy and submits a legal action from the bound agent', async () => {
+    const sock = new FakeSocket()
+    vi.stubGlobal('WebSocket', function WebSocket() { return sock })
+    const store = new SnapshotStore()
+    const conn = new ArenaConnection('', '', store, {
+      async resolve() { return { value: JSON.stringify(generateDeviceKeypair()) } },
+      async set() {},
+    })
+    const { ArenaAgentRunner } = await import('./agent-runner.ts')
+    const runner = new ArenaAgentRunner({
+      async create() {
+        return {
+          agent: {
+            ctx: {
+              tools: { presentAs: () => () => undefined, restrict: () => () => undefined },
+              systemPrompt: { section: () => () => undefined, suppressRuntimeContext: () => () => undefined },
+            },
+            followup() {},
+            async whenIdle() {},
+            session: {
+              events: [{
+                type: 'assistant/message',
+                seq: 1,
+                data: { message: { content: [{ type: 'text', text: '{"action":"fold","publicRationale":"fold"}' }] } },
+              }],
+            },
+          },
+          async dispose() {},
+        }
+      },
+    })
+    await runner.createContestant({ key: 'online', provider: 'openai-compatible', model: 'local' })
+    conn.bindContestant(runner, 'online')
+    await conn.start()
+    sock.emit('open')
+    sock.emit('message', JSON.stringify({ type: 'auth.session', payload: { deviceId: '11111111-1111-7111-8111-111111111111' } }))
+    const matchId = '11111111-1111-7111-8111-111111111111'
+    sock.emit('message', JSON.stringify({ type: 'match.proposal', payload: { matchId, commitment: 'c' } }))
+    expect(sock.sent.some((item) => item.includes('match.entropy'))).toBe(true)
+    sock.emit('message', JSON.stringify({
+      type: 'match.private',
+      payload: { matchId, handNo: 1, actionSeq: 0, holes: { A: ['As', 'Kh'] }, legal: [{ action: 'fold' }] },
+    }))
+    sock.emit('message', JSON.stringify({
+      type: 'match.action_request',
+      payload: { handNo: 1, actionSeq: 0, legal: [{ action: 'fold' }, { action: 'call' }] },
+    }))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(sock.sent.some((item) => item.includes('match.action'))).toBe(true)
+    conn.stop()
+    sock.close()
+    vi.unstubAllGlobals()
+  })
+
   it('generates keys, reconnects, streams as winner and fulfills as owner', async () => {
     const sockets: FakeSocket[] = []
     vi.stubGlobal('WebSocket', function WebSocket() {

@@ -25,7 +25,10 @@ services:
       DATABASE_URL: postgres://arena:arena@postgres:5432/arena
       REDIS_URL: redis://redis:6379
       ARENA_INVITE_CODES: E2EHOSTINVITE01,E2EGUESTINVITE02
-      ARENA_PROVIDER_ALLOWLIST: script
+      ARENA_PROVIDER_ALLOWLIST: openai-compatible,script
+      ARENA_PUBLIC_BASE_URL: http://127.0.0.1:8787
+      ARENA_HOST: 0.0.0.0
+      ARENA_PORT: 8787
     depends_on:
       postgres:
         condition: service_healthy

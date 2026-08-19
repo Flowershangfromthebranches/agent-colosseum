@@ -79,15 +79,19 @@ export class ArenaRuntime {
     const unsigned = defaultStakeSpec(deviceId, provider, model, toHex(randomBytes(16)), 'pending')
     const stake = { ...unsigned, signature: signStake(keys.ed25519PrivateKey, unsigned) }
     this.connection?.send('room.create', { stake })
+    await this.runner.createContestant({ key: 'online', provider, model })
+    this.connection?.bindContestant(this.runner, 'online')
     return this.store.patch({ view: 'room' })
   }
 
-  joinRoom(roomCode: string, provider: string, model: string) {
+  async joinRoom(roomCode: string, provider: string, model: string) {
     const keys = this.connection?.keys ?? generateDeviceKeypair()
     const deviceId = this.store.snapshot.deviceId ?? 'pending'
     const unsigned = defaultStakeSpec(deviceId, provider, model, toHex(randomBytes(16)), 'pending')
     const stake = { ...unsigned, signature: signStake(keys.ed25519PrivateKey, unsigned) }
     this.connection?.send('room.join', { roomCode, stake })
+    await this.runner.createContestant({ key: 'online', provider, model })
+    this.connection?.bindContestant(this.runner, 'online')
     return this.store.patch({ view: 'room', roomCode })
   }
 

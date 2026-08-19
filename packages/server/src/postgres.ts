@@ -67,15 +67,25 @@ export class PostgresStore implements ArenaStore {
     return rows[0] ? mapRoom(rows[0]) : undefined
   }
   async updateRoom(roomId: string, patch: Partial<RoomRecord>) {
-    const current = await this.getRoom(roomId)
-    if (!current) throw new Error('room not found')
-    const next = { ...current, ...patch }
-    await this.pool.query(
-      `UPDATE rooms SET guest_device_id=$2, guest_stake=$3, host_accepted=$4, guest_accepted=$5, match_id=$6, status=$7
-       WHERE room_id=$1`,
-      [roomId, next.guestDeviceId, next.guestStake ? JSON.stringify(next.guestStake) : null, next.hostAccepted, next.guestAccepted, next.matchId, next.status],
-    )
-    return next
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const locked = await client.query('SELECT * FROM rooms WHERE room_id = $1 FOR UPDATE', [roomId])
+      if (!locked.rows[0]) throw new Error('room not found')
+      const next = { ...mapRoom(locked.rows[0]), ...patch }
+      await client.query(
+        `UPDATE rooms SET guest_device_id=$2, guest_stake=$3, host_accepted=$4, guest_accepted=$5, match_id=$6, status=$7
+         WHERE room_id=$1`,
+        [roomId, next.guestDeviceId, next.guestStake ? JSON.stringify(next.guestStake) : null, next.hostAccepted, next.guestAccepted, next.matchId, next.status],
+      )
+      await client.query('COMMIT')
+      return next
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   async putMatch(match: MatchRecord) {

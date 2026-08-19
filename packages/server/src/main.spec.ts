@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 vi.mock('pg', () => ({
   default: {
     Pool: class {
+      on() { return this }
       async query() { return { rows: [{ ok: 1 }] } }
       async end() {}
       async connect() {
@@ -14,6 +15,7 @@ vi.mock('pg', () => ({
 
 vi.mock('ioredis', () => ({
   Redis: class {
+    on() { return this }
     async ping() { return 'PONG' }
     disconnect() {}
   },

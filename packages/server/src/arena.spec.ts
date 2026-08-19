@@ -71,6 +71,8 @@ describe('config and logs', () => {
     const def = loadConfig({})
     expect(def.port).toBe(8787)
     expect(def.providerAllowlist).toEqual([])
+    const codes = loadConfig({ ARENA_INVITE_CODES: 'INVITECODE12ABCD', ARENA_INVITE_USES: '3' })
+    expect(codes.inviteHashes.size).toBe(1)
   })
 })
 

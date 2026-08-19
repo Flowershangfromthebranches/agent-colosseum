@@ -27,7 +27,7 @@ export async function handleArenaRpc(runtime: ArenaRuntime, endpoint: string, pa
       }
       case 'room.join': {
         const body = payload as { roomCode: string; provider: string; model: string }
-        return ok(runtime.joinRoom(body.roomCode, body.provider, body.model))
+        return ok(await runtime.joinRoom(body.roomCode, body.provider, body.model))
       }
       case 'room.accept':
         return ok(runtime.acceptRoom())

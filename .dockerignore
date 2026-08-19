@@ -1,0 +1,9 @@
+**/node_modules
+**/.e2e-dsh
+coverage
+test-results
+playwright-report
+*.tgz
+.git
+.DS_Store
+deploy/data
