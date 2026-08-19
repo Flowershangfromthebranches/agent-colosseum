@@ -181,6 +181,74 @@ describe('arena online handle', () => {
     await expect(arena.handle(host.device.deviceId, replay as never)).rejects.toThrow(/REPLAY/)
   })
 
+  it('aborts an in-flight owner stream when the winner socket closes', async () => {
+    const arena = service()
+    const winner = await register(arena)
+    const owner = await register(arena)
+    const ownerFrames: Array<{ type: string; payload: unknown }> = []
+    const detachWinner = arena.attach(winner.device.deviceId, () => undefined)
+    arena.attach(owner.device.deviceId, (frame) => { ownerFrames.push(frame) })
+    const grantId = uuidv7()
+    await arena.store.saveGrant({
+      grantId, ownerDeviceId: owner.device.deviceId, winnerDeviceId: winner.device.deviceId,
+      model: 'm', provider: 'openai-compatible', callsRemaining: 2, activeConcurrency: 0,
+      onlineMsRemaining: 1000, ownerOnline: true, status: 'active', statusReason: 'active',
+      version: 1, stakeId: 's', lastOnlineTickAt: null,
+    })
+    const inferenceId = newInferenceId()
+    await arena.handle(winner.device.deviceId, frame('relay.reserve', {
+      grantId, inferenceId, ciphertext: 'aa', nonce: 'bb',
+      estimatedInputTokens: 1, requestBytes: 8, requestHash: 'h',
+    }) as never)
+    await arena.handle(owner.device.deviceId, frame('relay.preflight_ok', {
+      grantId, inferenceId, requestHash: 'h',
+    }) as never)
+    expect((await arena.store.getGrant(grantId))?.callsRemaining).toBe(1)
+    detachWinner()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(ownerFrames.some((item) => item.type === 'relay.abort')).toBe(true)
+    const inference = await arena.store.getInference(grantId, inferenceId)
+    expect(inference?.status).toBe('aborted')
+    expect(inference?.finishedAt).toBeTruthy()
+    expect((await arena.store.getGrant(grantId))?.callsRemaining).toBe(1)
+  })
+
+  it('skips relay abort when the grant row is already gone', async () => {
+    const arena = service()
+    const winner = await register(arena)
+    const owner = await register(arena)
+    arena.attach(winner.device.deviceId, () => undefined)
+    const missingGrantId = uuidv7()
+    await arena.store.insertInference({
+      grantId: missingGrantId,
+      inferenceId: newInferenceId(),
+      requesterDeviceId: winner.device.deviceId,
+      ownerDeviceId: owner.device.deviceId,
+      status: 'started',
+      deducted: true,
+      requestHash: 'h',
+      startedAt: 1,
+      finishedAt: null,
+      terminalReason: null,
+    })
+    const reservedId = newInferenceId()
+    const grantId = uuidv7()
+    await arena.store.saveGrant({
+      grantId, ownerDeviceId: owner.device.deviceId, winnerDeviceId: winner.device.deviceId,
+      model: 'm', provider: 'openai-compatible', callsRemaining: 2, activeConcurrency: 0,
+      onlineMsRemaining: 1000, ownerOnline: true, status: 'active', statusReason: 'active',
+      version: 1, stakeId: 's', lastOnlineTickAt: null,
+    })
+    await arena.store.insertInference({
+      grantId, inferenceId: reservedId, requesterDeviceId: winner.device.deviceId,
+      ownerDeviceId: owner.device.deviceId, status: 'reserved', deducted: false,
+      requestHash: 'h', startedAt: null, finishedAt: null, terminalReason: null,
+    })
+    await arena.handleDisconnect(winner.device.deviceId)
+    expect((await arena.store.listOpenInferencesForRequester(winner.device.deviceId)).map((item) => item.grantId)).toEqual([missingGrantId])
+    expect((await arena.store.getInference(grantId, reservedId))?.status).toBe('cancelled')
+  })
+
   it('covers auth conflicts, room errors, disconnects and unhandled frames', async () => {
     const arena = service()
     const store = arena.store as MemoryStore

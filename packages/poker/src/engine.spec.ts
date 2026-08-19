@@ -99,6 +99,45 @@ describe('betting', () => {
     expect(engine.state.players.A.stack).toBe(79)
   })
 
+  it('skips an all-in button SB and runs out to showdown after BB checks', () => {
+    const d = deck()
+    const engine = PokerEngine.create({
+      matchId: d.matchId,
+      deviceA: uuidv7(),
+      deviceB: uuidv7(),
+      deck: d.cards,
+    })
+    engine.state.players.A.stack = 1
+    engine.state.players.B.stack = STARTING_STACK * 2 - 1
+    engine.startHand(d.cards)
+    expect(engine.state.button).toBe('A')
+    expect(engine.state.allIn.A).toBe(true)
+    expect(engine.state.toAct).toBe('B')
+    expect(engine.legalActions().map((item) => item.action)).toContain('check')
+    expect(engine.legalActions().map((item) => item.action)).not.toEqual(['fold'])
+    engine.apply('B', 'check')
+    expect(engine.state.street).toBe('complete')
+    expect(engine.state.board).toHaveLength(5)
+    expect(engine.state.toAct).toBeNull()
+    expect(engine.totalChips()).toBe(STARTING_STACK * 2)
+    expect(engine.state.folded.A).toBe(false)
+  })
+
+  it('runs out when both blinds are already all-in', () => {
+    const d = deck()
+    const engine = PokerEngine.create({
+      matchId: d.matchId,
+      deviceA: uuidv7(),
+      deviceB: uuidv7(),
+      deck: d.cards,
+    })
+    engine.state.players.A.stack = 1
+    engine.state.players.B.stack = 1
+    expect(() => engine.startHand(d.cards)).toThrow(/conservation/)
+    expect(engine.state.board).toHaveLength(5)
+    expect(engine.state.toAct).toBeNull()
+  })
+
   it('serializes and restores mid-hand', () => {
     const { engine } = fresh()
     engine.apply('A', 'call')

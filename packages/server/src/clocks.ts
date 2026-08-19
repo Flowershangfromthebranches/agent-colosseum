@@ -1,12 +1,23 @@
 const ACTION_DEADLINE_MS = 60_000
 
-export class ArenaClocks {
+export type ClockHandlers = {
+  onActionTimeout(matchId: string, actionSeq: number): void
+  onDisconnectCheck(matchId: string): void
+}
+
+export interface ClockBoard {
+  scheduleAction(matchId: string, actionSeq: number, delayMs?: number): void
+  scheduleDisconnect(matchId: string, delayMs: number): void
+  cancelAction(matchId: string): void
+  cancelMatch(matchId: string): void
+  dispose(): void
+  readonly size: number
+}
+
+export class ArenaClocks implements ClockBoard {
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>()
 
-  constructor(private readonly handlers: {
-    onActionTimeout(matchId: string, actionSeq: number): void
-    onDisconnectCheck(matchId: string): void
-  }) {}
+  constructor(private readonly handlers: ClockHandlers) {}
 
   scheduleAction(matchId: string, actionSeq: number, delayMs = ACTION_DEADLINE_MS): void {
     this.set(`act:${matchId}`, delayMs, () => this.handlers.onActionTimeout(matchId, actionSeq))

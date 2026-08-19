@@ -3,12 +3,14 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import pg from 'pg'
 import { Redis } from 'ioredis'
+import { randomUUID } from 'node:crypto'
 import { ArenaService } from './arena.ts'
 import { loadConfig } from './config.ts'
 import { sha256Hex } from './hash.ts'
 import { buildServer } from './http.ts'
 import { logJson } from './log.ts'
 import { PostgresStore } from './postgres.ts'
+import { RedisBus, RedisClocks, RedisPresence, RedisRateLimit } from './redis-runtime.ts'
 
 const here = (() => {
   try {
@@ -39,8 +41,12 @@ export async function startArena(env: NodeJS.ProcessEnv = process.env): Promise<
     logJson('error', 'pg.idle', { message: error instanceof Error ? error.message : 'pg' })
   })
   const redis = new Redis(config.redisUrl)
+  const redisSub = redis.duplicate()
   redis.on('error', (error) => {
     logJson('error', 'redis.idle', { message: error instanceof Error ? error.message : 'redis' })
+  })
+  redisSub.on('error', (error) => {
+    logJson('error', 'redis.sub', { message: error instanceof Error ? error.message : 'redis' })
   })
   await migrate(pool)
   for (const [hash, { uses }] of config.inviteHashes) {
@@ -50,7 +56,18 @@ export async function startArena(env: NodeJS.ProcessEnv = process.env): Promise<
     )
   }
   const store = new PostgresStore(pool)
-  const arena = new ArenaService(store, config)
+  const instanceId = randomUUID()
+  const client = redis as unknown as import('./redis-runtime.ts').RedisLike
+  const sub = redisSub as unknown as import('./redis-runtime.ts').RedisLike
+  const presence = new RedisPresence(client)
+  const bus = new RedisBus(client, sub, instanceId)
+  const rateLimit = new RedisRateLimit(client)
+  const arena = new ArenaService(store, config, presence, {
+    instanceId,
+    bus,
+    rateLimit,
+    clocksFactory: (handlers) => new RedisClocks(client, handlers),
+  })
   await arena.restoreLive()
   const app = await buildServer(arena, config, {
     redisPing: async () => (await redis.ping()) === 'PONG',
@@ -60,6 +77,8 @@ export async function startArena(env: NodeJS.ProcessEnv = process.env): Promise<
   void sha256Hex
   return {
     async close() {
+      arena.clocks.dispose()
+      bus.close()
       await app.close()
       await pool.end()
       redis.disconnect()

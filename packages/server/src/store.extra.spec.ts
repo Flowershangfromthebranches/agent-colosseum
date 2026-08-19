@@ -34,6 +34,7 @@ describe('memory store extras', () => {
     })
     expect((await store.listGrantsForWinner(device.deviceId)).length).toBe(1)
     expect((await store.listGrantsForOwner(device.deviceId)).length).toBe(1)
+    expect(await store.listOpenInferencesForRequester(device.deviceId)).toEqual([])
     await store.appendEvent(matchId, 0, 'h', { type: 'x' })
     expect((await store.listEvents(matchId)).length).toBe(1)
     await expect(store.appendEvent(matchId, 0, 'h', {})).rejects.toThrow(/duplicate/)

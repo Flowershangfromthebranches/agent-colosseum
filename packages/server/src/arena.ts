@@ -22,9 +22,10 @@ import {
   type StakeSpecV1,
 } from '@agent-colosseum/protocol'
 import { issueChallenge, redeemDevice, type AuthChallenge } from './auth.ts'
-import { ArenaClocks } from './clocks.ts'
+import { ArenaClocks, type ClockBoard, type ClockHandlers } from './clocks.ts'
 import { isProviderAllowed, type ServerConfig } from './config.ts'
 import { MemoryPresence, type PresenceBook } from './presence.ts'
+import type { FrameBus, RateLimiter } from './redis-runtime.ts'
 import { RelayController } from './relay.ts'
 import { settleMatch, tickGrantOnline } from './settlement.ts'
 import type { ArenaStore, DeviceRecord, GrantRecord, MatchRecord, RoomRecord } from './store.ts'
@@ -38,19 +39,35 @@ export class ArenaService {
   readonly seen = new Map<string, Set<string>>()
   readonly engines = new Map<string, PokerEngine>()
   readonly challenges = new Map<string, AuthChallenge>()
-  readonly clocks: ArenaClocks
+  readonly clocks: ClockBoard
+  readonly bus: FrameBus | null
+  readonly rateLimit: RateLimiter | null
+  readonly instanceId: string
   private eventHash = new Map<string, string>()
 
   constructor(
     readonly store: ArenaStore,
     readonly config: ServerConfig,
     presence?: PresenceBook,
+    extras?: {
+      clocksFactory?: (handlers: ClockHandlers) => ClockBoard
+      bus?: FrameBus
+      rateLimit?: RateLimiter
+      instanceId?: string
+    },
   ) {
     this.presence = presence ?? new MemoryPresence()
     this.relay = new RelayController(store)
-    this.clocks = new ArenaClocks({
+    this.bus = extras?.bus ?? null
+    this.rateLimit = extras?.rateLimit ?? null
+    this.instanceId = extras?.instanceId ?? 'local'
+    const handlers: ClockHandlers = {
       onActionTimeout: (matchId, actionSeq) => { void this.timeoutSeat(matchId, actionSeq) },
       onDisconnectCheck: (matchId) => { void this.evaluateDisconnect(matchId) },
+    }
+    this.clocks = extras?.clocksFactory?.(handlers) ?? new ArenaClocks(handlers)
+    this.bus?.listen((deviceId, frame) => {
+      this.deliverLocal(deviceId, frame)
     })
   }
 
@@ -80,16 +97,25 @@ export class ArenaService {
     }
   }
 
+  deliverLocal(deviceId: string, frame: Outbound): void {
+    for (const sink of this.sockets.get(deviceId) ?? []) sink(frame)
+  }
+
   send(deviceId: string, type: string, payload: unknown): void {
     const frame = { type, payload }
-    for (const sink of this.sockets.get(deviceId) ?? []) sink(frame)
+    this.deliverLocal(deviceId, frame)
+    void this.bus?.publish(this.instanceId, deviceId, frame)
   }
 
   broadcast(deviceIds: string[], type: string, payload: unknown): void {
     for (const id of new Set(deviceIds)) this.send(id, type, payload)
   }
 
-  remember(deviceId: string, messageId: string): void {
+  async remember(deviceId: string, messageId: string): Promise<void> {
+    if (this.rateLimit) {
+      await this.rateLimit.remember(deviceId, messageId)
+      return
+    }
     const set = this.seen.get(deviceId) ?? new Set()
     if (set.has(messageId)) throw new Error('REPLAY')
     set.add(messageId)
@@ -97,7 +123,7 @@ export class ArenaService {
   }
 
   async handle(deviceId: string, frame: KnownClientFrame): Promise<void> {
-    this.remember(deviceId, frame.messageId)
+    await this.remember(deviceId, frame.messageId)
     this.presence.beat(deviceId)
     switch (frame.type) {
       case 'session.heartbeat':
@@ -236,6 +262,7 @@ export class ArenaService {
 
   async handleDisconnect(deviceId: string, now = Date.now()): Promise<void> {
     this.presence.disconnect(deviceId, now)
+    await this.abortWinnerRelays(deviceId)
     for (const engine of this.engines.values()) {
       if (engine.state.terminal) continue
       const ids = [engine.state.players.A.deviceId, engine.state.players.B.deviceId]
@@ -415,6 +442,25 @@ export class ArenaService {
     if (grant) {
       const ticked = await tickGrantOnline(this.store, grant, this.presence.isOnline(grant.ownerDeviceId))
       await this.publishGrant(ticked)
+    }
+  }
+
+  private async abortWinnerRelays(winnerId: string): Promise<void> {
+    const open = await this.store.listOpenInferencesForRequester(winnerId)
+    for (const inference of open) {
+      const grant = await this.store.getGrant(inference.grantId)
+      if (!grant) continue
+      this.send(grant.ownerDeviceId, 'relay.abort', {
+        grantId: inference.grantId,
+        inferenceId: inference.inferenceId,
+      })
+      const status = inference.deducted ? 'aborted' as const : 'cancelled' as const
+      await this.relay.terminal(inference.grantId, inference.inferenceId, status, 'winner_disconnected')
+      this.send(grant.winnerDeviceId, 'relay.terminal', {
+        grantId: inference.grantId,
+        inferenceId: inference.inferenceId,
+        status,
+      })
     }
   }
 

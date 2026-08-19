@@ -214,6 +214,13 @@ export class PostgresStore implements ArenaStore {
     )
     return rows[0] ? mapInference(rows[0]) : undefined
   }
+  async listOpenInferencesForRequester(deviceId: string) {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM inferences WHERE requester_device_id = $1 AND finished_at IS NULL',
+      [deviceId],
+    )
+    return rows.map(mapInference)
+  }
   async insertInference(record: InferenceCallV1) {
     try {
       await this.pool.query(

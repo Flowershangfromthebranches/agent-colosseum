@@ -176,6 +176,24 @@ describe('ArenaConnection', () => {
     sock.emit('message', JSON.stringify({ type: 'relay.inference_started', payload: {} }))
     await fulfill
 
+    const liveAbort = new AbortController()
+    const liveGrant = {
+      grantId, ownerDeviceId: 'o', winnerDeviceId: 'w', model: 'm', provider: 'p',
+      callsRemaining: 1, activeConcurrency: 0, onlineMsRemaining: 1, ownerOnline: true,
+      status: 'active' as const, statusReason: 'active' as const, version: 1,
+      ownerX25519PublicKey: owner.x25519PublicKey,
+    }
+    const live = (async () => {
+      for await (const _ of conn.streamAsWinner({
+        provider: 'p', model: 'm', messages: ['hi'], signal: liveAbort.signal,
+      }, liveGrant)) { /* drain */ }
+    })()
+    await Promise.resolve()
+    sock.emit('message', JSON.stringify({ type: 'relay.inference_started', payload: {} }))
+    liveAbort.abort()
+    await live
+    expect(sock.sent.some((item) => item.includes('"cancelled"'))).toBe(true)
+
     const abort = new AbortController()
     abort.abort()
     const grant = {

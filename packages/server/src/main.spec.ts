@@ -13,13 +13,10 @@ vi.mock('pg', () => ({
   },
 }))
 
-vi.mock('ioredis', () => ({
-  Redis: class {
-    on() { return this }
-    async ping() { return 'PONG' }
-    disconnect() {}
-  },
-}))
+vi.mock('ioredis', async () => {
+  const { MemoryRedis } = await import('./redis-runtime.ts')
+  return { Redis: MemoryRedis }
+})
 
 import { migrate, startArena } from './main.ts'
 import { runMigrate } from './migrate.ts'

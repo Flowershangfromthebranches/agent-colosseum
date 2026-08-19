@@ -116,9 +116,15 @@ export class PokerEngine {
     this.postBlind(bb, blinds.big)
     this.state.currentBet = Math.max(this.state.streetCommitted.A, this.state.streetCommitted.B)
     this.state.lastRaiseSize = blinds.big
-    this.state.toAct = this.state.allIn[button] && this.state.allIn[bb] ? null : button
     this.recomputePot()
-    if (this.state.allIn.A && this.state.allIn.B) this.runOut()
+    if (!this.state.allIn[button]) {
+      this.state.toAct = button
+    } else if (!this.state.allIn[bb]) {
+      this.state.toAct = bb
+    } else {
+      this.state.toAct = null
+      this.runOut()
+    }
   }
 
   legalActions(): LegalAction[] {

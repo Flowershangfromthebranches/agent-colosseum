@@ -44,8 +44,10 @@ export class ArenaConnection {
   private seat: SeatId | null = null
   private matchId: string | null = null
   private readonly waiters = new Map<string, (payload: Record<string, unknown>) => void>()
+  private readonly waiterRejects = new Set<(error: Error) => void>()
   private readonly backlog = new Map<string, Array<{ type: string; payload: Record<string, unknown> }>>()
   private readonly ownerAborts = new Map<string, AbortController>()
+  private readonly winnerStops = new Set<AbortController>()
   private ready = false
   private readonly readyWaiters: Array<() => void> = []
 
@@ -112,20 +114,38 @@ export class ArenaConnection {
       requestBytes: estimate.bytes,
       requestHash: requestHashOf(options),
     })
-    await this.waitType('relay.inference_started')
-    const shared = deriveSharedKey(this.keys.x25519PrivateKey, ownerPub)
-    while (true) {
-      if (options.signal?.aborted) {
+    const stop = new AbortController()
+    this.winnerStops.add(stop)
+    const cancel = () => {
+      if (!stop.signal.aborted) stop.abort()
+      try {
         this.send('relay.terminal', { grantId: grant.grantId, inferenceId, status: 'cancelled' })
-        return
+      } catch { /* socket may already be closed; server handleDisconnect still aborts the Owner */ }
+      this.failWaiters(new Error('aborted'))
+    }
+    if (options.signal?.aborted) {
+      cancel()
+      this.winnerStops.delete(stop)
+      return
+    }
+    options.signal?.addEventListener('abort', cancel, { once: true })
+    try {
+      await this.waitType('relay.inference_started')
+      const shared = deriveSharedKey(this.keys.x25519PrivateKey, ownerPub)
+      while (!options.signal?.aborted && !stop.signal.aborted) {
+        const frame = await this.waitType('relay.chunk', 'relay.terminal')
+        if (frame.type === 'relay.terminal') return
+        const seq = Number(frame.payload.seq)
+        yield openJson<StreamChunk>(shared, {
+          nonce: String(frame.payload.nonce),
+          ciphertext: String(frame.payload.ciphertext),
+        }, relayAad({ grantId: grant.grantId, inferenceId, seq, direction: 'owner_to_winner' }))
       }
-      const frame = await this.waitType('relay.chunk', 'relay.terminal')
-      if (frame.type === 'relay.terminal') return
-      const seq = Number(frame.payload.seq)
-      yield openJson<StreamChunk>(shared, {
-        nonce: String(frame.payload.nonce),
-        ciphertext: String(frame.payload.ciphertext),
-      }, relayAad({ grantId: grant.grantId, inferenceId, seq, direction: 'owner_to_winner' }))
+    } catch (error) {
+      if (!String(error instanceof Error ? error.message : error).includes('aborted')) throw error
+    } finally {
+      options.signal?.removeEventListener('abort', cancel)
+      this.winnerStops.delete(stop)
     }
   }
 
@@ -307,6 +327,7 @@ export class ArenaConnection {
       }
       if (data.type === 'relay.abort') {
         this.ownerAborts.get(`${data.payload.grantId}:${data.payload.inferenceId}`)?.abort()
+        this.failWaiters(new Error('aborted'))
       }
       const waiter = this.waiters.get(data.type)
       if (waiter) {
@@ -321,6 +342,8 @@ export class ArenaConnection {
     ws.addEventListener('close', () => {
       this.ready = false
       this.store.patch({ connectionState: 'offline', serverReachable: false })
+      for (const stop of this.winnerStops) stop.abort()
+      this.failWaiters(new Error('aborted'))
       if (this.closed) return
       const delay = Math.min(15_000, 500 * 2 ** this.attempts)
       this.attempts += 1
@@ -332,6 +355,13 @@ export class ArenaConnection {
     ws.addEventListener('close', () => clearInterval(beat))
   }
 
+  private failWaiters(error: Error): void {
+    const rejects = [...this.waiterRejects]
+    this.waiterRejects.clear()
+    this.waiters.clear()
+    for (const reject of rejects) reject(error)
+  }
+
   private waitType(...types: string[]): Promise<{ type: string; payload: Record<string, unknown> }> {
     for (const type of types) {
       const queued = this.backlog.get(type)
@@ -339,10 +369,20 @@ export class ArenaConnection {
       if (next) return Promise.resolve(next)
     }
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('relay timeout')), 60_000)
+      const timer = setTimeout(() => {
+        this.waiterRejects.delete(reject)
+        reject(new Error('relay timeout'))
+      }, 60_000)
+      const fail = (error: Error) => {
+        clearTimeout(timer)
+        for (const type of types) this.waiters.delete(type)
+        reject(error)
+      }
+      this.waiterRejects.add(fail)
       for (const type of types) {
         this.waiters.set(type, (payload) => {
           clearTimeout(timer)
+          this.waiterRejects.delete(fail)
           for (const other of types) this.waiters.delete(other)
           resolve({ type, payload })
         })
@@ -372,6 +412,7 @@ export class ArenaConnection {
       const routed = ownerRoutedOptions(grant, opened, abort.signal)
       const shared = deriveSharedKey(this.keys.x25519PrivateKey, winnerPub)
       let seq = 1
+      if (abort.signal.aborted) throw new Error('aborted')
       for await (const chunk of this.ownerLlm.stream(routed)) {
         if (abort.signal.aborted) break
         const sealed = sealJson(shared, chunk, relayAad({
@@ -382,7 +423,11 @@ export class ArenaConnection {
       }
       this.send('relay.terminal', { grantId, inferenceId, status: abort.signal.aborted ? 'aborted' : 'completed' })
     } catch {
-      this.send('relay.terminal', { grantId, inferenceId, status: 'provider_error' })
+      this.send('relay.terminal', {
+        grantId,
+        inferenceId,
+        status: abort.signal.aborted ? 'aborted' : 'provider_error',
+      })
     } finally {
       this.ownerAborts.delete(`${grantId}:${inferenceId}`)
     }

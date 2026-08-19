@@ -81,6 +81,7 @@ export interface ArenaStore {
   listGrantsForOwner(deviceId: string): Promise<GrantRecord[]>
   saveGrant(grant: GrantRecord): Promise<void>
   getInference(grantId: string, inferenceId: string): Promise<InferenceCallV1 | undefined>
+  listOpenInferencesForRequester(deviceId: string): Promise<InferenceCallV1[]>
   insertInference(record: InferenceCallV1): Promise<'created' | 'duplicate'>
   updateInference(record: InferenceCallV1): Promise<void>
   deductIfStarted(grantId: string, inferenceId: string): Promise<GrantRecord>
@@ -197,6 +198,10 @@ export class MemoryStore implements ArenaStore {
   async saveGrant(grant: GrantRecord) { this.grants.set(grant.grantId, { ...grant }) }
   async getInference(grantId: string, inferenceId: string) {
     return this.inferences.get(`${grantId}:${inferenceId}`)
+  }
+  async listOpenInferencesForRequester(deviceId: string) {
+    return [...this.inferences.values()].filter((item) =>
+      item.requesterDeviceId === deviceId && item.finishedAt === null)
   }
   async insertInference(record: InferenceCallV1) {
     const key = `${record.grantId}:${record.inferenceId}`

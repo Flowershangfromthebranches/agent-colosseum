@@ -106,6 +106,12 @@ describe('PostgresStore', () => {
           last_online_tick_at: 9,
         }] }
       }
+      if (sql.includes('requester_device_id') && sql.includes('finished_at IS NULL')) {
+        return { rows: [{
+          grant_id: grantId, inference_id: 'i', requester_device_id: 'a', owner_device_id: 'b',
+          status: 'started', deducted: true, request_hash: 'h', started_at: 1, finished_at: null, terminal_reason: null,
+        }] }
+      }
       if (sql.includes('FROM inferences')) {
         return { rows: [{
           grant_id: grantId, inference_id: 'i', requester_device_id: 'a', owner_device_id: 'b',
@@ -153,6 +159,7 @@ describe('PostgresStore', () => {
       ownerOnline: false, status: 'active', statusReason: 'active', version: 1, stakeId: 's', lastOnlineTickAt: null,
     })
     expect(await mapped.getInference(grantId, 'i')).toBeTruthy()
+    expect((await mapped.listOpenInferencesForRequester('a')).length).toBe(1)
     expect(await mapped.insertInference({
       grantId, inferenceId: newInferenceId(), requesterDeviceId: newDeviceId(), ownerDeviceId: newDeviceId(),
       status: 'reserved', deducted: false, requestHash: 'h', startedAt: null, finishedAt: null, terminalReason: null,
