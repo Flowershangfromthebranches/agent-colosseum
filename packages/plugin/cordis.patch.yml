@@ -1,0 +1,8 @@
+- insert:
+    - id: agent-colosseum
+      name: agent-colosseum
+      inject: [llm, agents]
+      config:
+        serverUrl: !!js process.env.ARENA_URL ?? 'wss://127.0.0.1:8787/v1/ws'
+        inviteCode: !!js process.env.ARENA_INVITE_CODE ?? ''
+        allowUnverifiedDsh: !!js process.env.ARENA_ALLOW_UNVERIFIED_DSH === '1'

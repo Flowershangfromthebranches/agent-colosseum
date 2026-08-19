@@ -1,0 +1,22 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install
+      - run: pnpm test
+      - run: pnpm --filter agent-colosseum build
+      - name: compatibility canary
+        continue-on-error: true
+        run: echo "Non-blocking DSH master canary — pin remains 0.1.0-rc.7"

@@ -1,0 +1,17 @@
+node_modules
+dist
+lib
+coverage
+*.tsbuildinfo
+.DS_Store
+.env
+.env.*
+!.env.example
+*.tgz
+*.log
+.pnpm-store
+deploy/data
+playwright-report
+test-results
+.oxlintrc.cache
+*.failed

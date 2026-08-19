@@ -1,0 +1,10 @@
+FROM node:24-bookworm-slim
+WORKDIR /app
+RUN corepack enable
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml* ./
+COPY packages ./packages
+RUN pnpm install --frozen-lockfile=false --filter @agent-colosseum/server...
+WORKDIR /app/packages/server
+ENV NODE_ENV=production
+EXPOSE 8787
+CMD ["node", "--import", "tsx", "src/main.ts"]

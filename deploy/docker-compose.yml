@@ -1,0 +1,60 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: arena
+      POSTGRES_PASSWORD: arena
+      POSTGRES_DB: arena
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U arena -d arena']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7
+    command: ['redis-server', '--appendonly', 'yes']
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  arena:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    environment:
+      DATABASE_URL: postgres://arena:arena@postgres:5432/arena
+      REDIS_URL: redis://redis:6379
+      ARENA_HOST: 0.0.0.0
+      ARENA_PORT: 8787
+      ARENA_INVITE_CODES: ${ARENA_INVITE_CODES:-}
+      ARENA_PROVIDER_ALLOWLIST: ${ARENA_PROVIDER_ALLOWLIST:-script,openai-compatible}
+      ARENA_PUBLIC_BASE_URL: ${ARENA_PUBLIC_BASE_URL:-https://arena.example.com}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  caddy:
+    image: caddy:2
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy:/data
+    depends_on:
+      arena:
+        condition: service_healthy

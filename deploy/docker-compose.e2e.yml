@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: arena
+      POSTGRES_PASSWORD: arena
+      POSTGRES_DB: arena
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U arena -d arena']
+      interval: 5s
+      retries: 20
+
+  redis:
+    image: redis:7
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      retries: 20
+
+  arena:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.server
+    environment:
+      DATABASE_URL: postgres://arena:arena@postgres:5432/arena
+      REDIS_URL: redis://redis:6379
+      ARENA_INVITE_CODES: E2EHOSTINVITE01,E2EGUESTINVITE02
+      ARENA_PROVIDER_ALLOWLIST: script
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - '8787:8787'

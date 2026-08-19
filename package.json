@@ -1,0 +1,27 @@
+{
+  "name": "agent-colosseum-monorepo",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@9.15.9",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "pnpm -r --filter \"./packages/**\" run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "pnpm -r --filter \"./packages/**\" run typecheck",
+    "lint": "pnpm -r --filter \"./packages/**\" run typecheck",
+    "pack:plugin": "pnpm --filter agent-colosseum pack",
+    "server": "pnpm --filter @agent-colosseum/server start",
+    "migrate": "pnpm --filter @agent-colosseum/server migrate"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "@vitest/coverage-v8": "^3.2.4",
+    "esbuild": "^0.25.9",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

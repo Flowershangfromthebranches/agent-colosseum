@@ -1,0 +1,8 @@
+{
+  email {$CADDY_EMAIL:ops@example.com}
+}
+
+{$ARENA_DOMAIN:arena.example.com} {
+  encode gzip
+  reverse_proxy arena:8787
+}

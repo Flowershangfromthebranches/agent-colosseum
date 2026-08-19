@@ -1,0 +1,31 @@
+{
+  "name": "@agent-colosseum/server",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "bin": {
+    "agent-colosseum-server": "./src/main.ts"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "start": "node --import tsx src/main.ts",
+    "migrate": "node --import tsx src/migrate.ts"
+  },
+  "dependencies": {
+    "@agent-colosseum/crypto": "workspace:*",
+    "@agent-colosseum/poker": "workspace:*",
+    "@agent-colosseum/protocol": "workspace:*",
+    "@fastify/websocket": "^11.2.0",
+    "fastify": "^5.5.0",
+    "ioredis": "^5.7.0",
+    "pg": "^8.16.3",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.5",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
