@@ -1,0 +1,18 @@
+{
+	admin off
+	https_port 8443
+	http_port 8080
+	local_certs
+	servers {
+		protocols h1 h2
+	}
+}
+
+localhost {
+	tls internal
+	reverse_proxy arena:8787
+}
+
+http://127.0.0.1:8080 {
+	reverse_proxy arena:8787
+}

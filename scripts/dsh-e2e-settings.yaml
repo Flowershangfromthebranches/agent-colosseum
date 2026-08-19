@@ -1,0 +1,20 @@
+llm-pi-ai:
+  providers:
+    openai-compatible:
+      displayName: Local OpenAI-compatible
+      api: openai-completions
+      baseURL: http://127.0.0.1:8899/v1
+      apiKeyEnv: ARENA_MOCK_OPENAI_KEY
+      models:
+        - id: fold-a
+          name: Fold A
+          contextWindow: 16000
+          maxTokens: 256
+          input:
+            - text
+        - id: fold-b
+          name: Fold B
+          contextWindow: 16000
+          maxTokens: 256
+          input:
+            - text

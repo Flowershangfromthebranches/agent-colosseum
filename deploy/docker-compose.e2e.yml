@@ -27,7 +27,7 @@ services:
       ARENA_INVITE_CODES: E2EHOSTINVITE01,E2EGUESTINVITE02
       ARENA_INVITE_USES: '1000'
       ARENA_PROVIDER_ALLOWLIST: openai-compatible,script
-      ARENA_PUBLIC_BASE_URL: http://127.0.0.1:8787
+      ARENA_PUBLIC_BASE_URL: https://localhost:8443
       ARENA_HOST: 0.0.0.0
       ARENA_PORT: 8787
     depends_on:
@@ -35,5 +35,25 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:8787/readyz').then(r=>process.exit(r.ok?0:1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
     ports:
       - '8787:8787'
+
+  caddy:
+    image: caddy:2
+    environment:
+      ARENA_DOMAIN: 127.0.0.1
+      CADDY_EMAIL: e2e@localhost
+    ports:
+      - '8443:8443'
+      - '8080:8080'
+    volumes:
+      - ./Caddyfile.e2e:/etc/caddy/Caddyfile:ro
+      - ./data/caddy-e2e:/data
+    depends_on:
+      arena:
+        condition: service_healthy
