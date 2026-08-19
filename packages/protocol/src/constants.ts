@@ -1,7 +1,11 @@
 export const PROTOCOL_VERSION = 1 as const
+export const SCHEMA_VERSION = 1 as const
 export const PINNED_DSH_VERSION = '0.1.0-rc.7'
 export const PROVIDER_ID = 'agent-colosseum'
 export const RPC_CHANNEL = '/agent-colosseum'
+export const IDENTITY_DOMAIN = 'agent-colosseum/device-v1'
+export const STAKE_DOMAIN = 'agent-colosseum/stake-v1'
+export const ENTROPY_DOMAIN = 'agent-colosseum/entropy-v1'
 
 export const STARTING_STACK = 80
 export const MAX_HANDS = 20
@@ -31,6 +35,15 @@ export type PokerActionKind = (typeof SUPPORTED_ACTIONS)[number]
 export const GRANT_STATUSES = ['active', 'exhausted', 'suspended', 'defaulted'] as const
 export type GrantStatus = (typeof GRANT_STATUSES)[number]
 
+export const GRANT_STATUS_REASONS = [
+  'active',
+  'calls_exhausted',
+  'ttl_exhausted',
+  'owner_defaulted',
+  'suspended',
+] as const
+export type GrantStatusReason = (typeof GRANT_STATUS_REASONS)[number]
+
 export const MATCH_TERMINAL_REASONS = [
   'bust',
   'chip_lead',
@@ -40,3 +53,31 @@ export const MATCH_TERMINAL_REASONS = [
   'draw_released',
 ] as const
 export type MatchTerminalReason = (typeof MATCH_TERMINAL_REASONS)[number]
+
+export const ERROR_CODES = [
+  'UNSUPPORTED_VERSION',
+  'UNKNOWN_TYPE',
+  'UNKNOWN_FIELD',
+  'INVALID_FRAME',
+  'REPLAY',
+  'OUT_OF_ORDER',
+  'STALE_ACTION',
+  'UNAUTHORIZED',
+  'OLD_SCHEMA',
+  'INVITE_INVALID',
+  'INVITE_EXHAUSTED',
+  'IDENTITY_CONFLICT',
+  'STAKE_MISMATCH',
+  'STAKE_SIGNATURE',
+  'PROVIDER_DENIED',
+  'GRANT_UNAVAILABLE',
+  'OWNER_OFFLINE',
+  'GRANT_EXHAUSTED',
+  'TTL_EXHAUSTED',
+  'REQUEST_TOO_LARGE',
+  'INPUT_TOO_LARGE',
+  'MAX_TOKENS_EXCEEDED',
+  'CONCURRENCY',
+  'ILLEGAL_ACTION',
+] as const
+export type ErrorCode = (typeof ERROR_CODES)[number]

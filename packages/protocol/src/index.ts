@@ -1,5 +1,6 @@
 export * from './constants.ts'
 export * from './ids.ts'
+export * from './errors.ts'
 export * from './stake.ts'
 export * from './grant.ts'
 export * from './poker-action.ts'

@@ -1,42 +1,52 @@
 import pg from 'pg'
-import type {
-  ArenaStore,
-  DeviceRecord,
-  EventRecord,
-  GrantRecord,
-  InferenceRecord,
-  MatchRecord,
-  RoomRecord,
-  StakeRecord,
-} from './store.ts'
+import type { InferenceCallV1 } from '@agent-colosseum/protocol'
+import type { ArenaStore, DeviceRecord, GrantRecord, MatchRecord, RoomRecord, StakeRecord } from './store.ts'
 
 export class PostgresStore implements ArenaStore {
   constructor(private readonly pool: pg.Pool) {}
 
+  async consumeInvite(codeHash: string): Promise<boolean> {
+    const { rowCount } = await this.pool.query(
+      `UPDATE invites SET uses_remaining = uses_remaining - 1
+       WHERE code_hash = $1 AND uses_remaining > 0`,
+      [codeHash],
+    )
+    return (rowCount ?? 0) > 0
+  }
+
+  async seedInvite(codeHash: string, uses: number): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO invites (code_hash, uses_remaining, max_uses) VALUES ($1,$2,$2)
+       ON CONFLICT (code_hash) DO NOTHING`,
+      [codeHash, uses],
+    )
+  }
+
   async putDevice(device: DeviceRecord): Promise<void> {
     await this.pool.query(
       `INSERT INTO devices (device_id, ed25519_public_key, x25519_public_key, created_at, last_seen_at)
-       VALUES ($1,$2,$3,$4,$5)
-       ON CONFLICT (device_id) DO UPDATE SET last_seen_at = EXCLUDED.last_seen_at`,
+       VALUES ($1,$2,$3,$4,$5)`,
       [device.deviceId, device.ed25519PublicKey, device.x25519PublicKey, device.createdAt, device.lastSeenAt],
     )
   }
 
-  async getDevice(deviceId: string): Promise<DeviceRecord | undefined> {
+  async getDevice(deviceId: string) {
     const { rows } = await this.pool.query('SELECT * FROM devices WHERE device_id = $1', [deviceId])
     return rows[0] ? mapDevice(rows[0]) : undefined
   }
-
-  async findDeviceByPubkey(ed25519PublicKey: string): Promise<DeviceRecord | undefined> {
-    const { rows } = await this.pool.query('SELECT * FROM devices WHERE ed25519_public_key = $1', [ed25519PublicKey])
+  async findDeviceByEd25519(key: string) {
+    const { rows } = await this.pool.query('SELECT * FROM devices WHERE ed25519_public_key = $1', [key])
     return rows[0] ? mapDevice(rows[0]) : undefined
   }
-
-  async touchDevice(deviceId: string, at: number): Promise<void> {
+  async findDeviceByX25519(key: string) {
+    const { rows } = await this.pool.query('SELECT * FROM devices WHERE x25519_public_key = $1', [key])
+    return rows[0] ? mapDevice(rows[0]) : undefined
+  }
+  async touchDevice(deviceId: string, at: number) {
     await this.pool.query('UPDATE devices SET last_seen_at = $2 WHERE device_id = $1', [deviceId, at])
   }
 
-  async putRoom(room: RoomRecord): Promise<void> {
+  async putRoom(room: RoomRecord) {
     await this.pool.query(
       `INSERT INTO rooms (room_id, room_code, host_device_id, guest_device_id, host_stake, guest_stake,
         host_accepted, guest_accepted, match_id, status)
@@ -48,115 +58,148 @@ export class PostgresStore implements ArenaStore {
       ],
     )
   }
-
-  async getRoom(roomId: string): Promise<RoomRecord | undefined> {
+  async getRoom(roomId: string) {
     const { rows } = await this.pool.query('SELECT * FROM rooms WHERE room_id = $1', [roomId])
     return rows[0] ? mapRoom(rows[0]) : undefined
   }
-
-  async findRoomByCode(code: string): Promise<RoomRecord | undefined> {
+  async findRoomByCode(code: string) {
     const { rows } = await this.pool.query('SELECT * FROM rooms WHERE room_code = $1', [code])
     return rows[0] ? mapRoom(rows[0]) : undefined
   }
-
-  async updateRoom(roomId: string, patch: Partial<RoomRecord>): Promise<RoomRecord> {
+  async updateRoom(roomId: string, patch: Partial<RoomRecord>) {
     const current = await this.getRoom(roomId)
     if (!current) throw new Error('room not found')
     const next = { ...current, ...patch }
     await this.pool.query(
-      `UPDATE rooms SET guest_device_id=$2, guest_stake=$3, host_accepted=$4, guest_accepted=$5,
-        match_id=$6, status=$7 WHERE room_id=$1`,
-      [
-        roomId, next.guestDeviceId, next.guestStake ? JSON.stringify(next.guestStake) : null,
-        next.hostAccepted, next.guestAccepted, next.matchId, next.status,
-      ],
+      `UPDATE rooms SET guest_device_id=$2, guest_stake=$3, host_accepted=$4, guest_accepted=$5, match_id=$6, status=$7
+       WHERE room_id=$1`,
+      [roomId, next.guestDeviceId, next.guestStake ? JSON.stringify(next.guestStake) : null, next.hostAccepted, next.guestAccepted, next.matchId, next.status],
     )
     return next
   }
 
-  async putMatch(match: MatchRecord): Promise<void> {
+  async putMatch(match: MatchRecord) {
     await this.pool.query(
-      `INSERT INTO matches (match_id, room_id, button_device_id, bb_device_id, server_seed_hex, commitment,
-        player_entropy, status, winner_device_id, settled, created_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      `INSERT INTO matches (match_id, room_id, device_a, device_b, commitment, server_seed_hex, entropy_a, entropy_b,
+        status, winner_device_id, settled, state, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [
-        match.matchId, match.roomId, match.buttonDeviceId, match.bbDeviceId, match.serverSeedHex,
-        match.commitment, JSON.stringify(match.playerEntropy), match.status, match.winnerDeviceId,
-        match.settled, match.createdAt,
+        match.matchId, match.roomId, match.deviceA, match.deviceB, match.commitment, match.serverSeedHex,
+        match.entropyA, match.entropyB, match.status, match.winnerDeviceId, match.settled,
+        JSON.stringify(match.state), match.createdAt,
       ],
     )
   }
-
-  async getMatch(matchId: string): Promise<MatchRecord | undefined> {
+  async getMatch(matchId: string) {
     const { rows } = await this.pool.query('SELECT * FROM matches WHERE match_id = $1', [matchId])
     return rows[0] ? mapMatch(rows[0]) : undefined
   }
-
-  async settleMatch(matchId: string, winnerDeviceId: string | null): Promise<boolean> {
-    const { rowCount } = await this.pool.query(
-      `UPDATE matches SET settled = TRUE, status = 'terminal', winner_device_id = $2
-       WHERE match_id = $1 AND settled = FALSE`,
-      [matchId, winnerDeviceId],
-    )
-    return (rowCount ?? 0) > 0
+  async listLiveMatches() {
+    const { rows } = await this.pool.query(`SELECT * FROM matches WHERE status IN ('live','pending_entropy')`)
+    return rows.map(mapMatch)
   }
-
-  async putStake(stake: StakeRecord): Promise<void> {
+  async saveMatchState(matchId: string, patch: Partial<MatchRecord>) {
+    const current = await this.getMatch(matchId)
+    if (!current) throw new Error('match not found')
+    const next = { ...current, ...patch }
     await this.pool.query(
-      `INSERT INTO stakes (stake_id, match_id, spec, status) VALUES ($1,$2,$3,$4)`,
-      [stake.stakeId, stake.matchId, JSON.stringify(stake.spec), stake.status],
+      `UPDATE matches SET entropy_a=$2, entropy_b=$3, status=$4, state=$5, winner_device_id=$6 WHERE match_id=$1`,
+      [matchId, next.entropyA, next.entropyB, next.status, JSON.stringify(next.state), next.winnerDeviceId],
     )
   }
 
-  async listStakes(matchId: string): Promise<StakeRecord[]> {
+  async settleInTransaction(input: {
+    matchId: string
+    winnerDeviceId: string | null
+    reason: string
+    grant?: GrantRecord
+    stakeUpdates: Array<{ stakeId: string; status: StakeRecord['status'] }>
+  }) {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const locked = await client.query('SELECT * FROM matches WHERE match_id = $1 FOR UPDATE', [input.matchId])
+      const match = locked.rows[0]
+      if (!match) throw new Error('match not found')
+      if (match.settled) {
+        const existing = await client.query('SELECT * FROM grants WHERE stake_id IN (SELECT stake_id FROM stakes WHERE match_id = $1)', [input.matchId])
+        await client.query('COMMIT')
+        return { first: false, grant: existing.rows[0] ? mapGrant(existing.rows[0]) : null }
+      }
+      await client.query(
+        `UPDATE matches SET settled = TRUE, status = 'terminal', winner_device_id = $2 WHERE match_id = $1`,
+        [input.matchId, input.winnerDeviceId],
+      )
+      for (const update of input.stakeUpdates) {
+        await client.query('SELECT stake_id FROM stakes WHERE stake_id = $1 FOR UPDATE', [update.stakeId])
+        await client.query('UPDATE stakes SET status = $2 WHERE stake_id = $1', [update.stakeId, update.status])
+      }
+      if (input.grant) {
+        const g = input.grant
+        await client.query(
+          `INSERT INTO grants (grant_id, owner_device_id, winner_device_id, model, provider, calls_remaining,
+            active_concurrency, online_ms_remaining, owner_online, status, status_reason, version, stake_id, last_online_tick_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+          [
+            g.grantId, g.ownerDeviceId, g.winnerDeviceId, g.model, g.provider, g.callsRemaining,
+            g.activeConcurrency, g.onlineMsRemaining, g.ownerOnline, g.status, g.statusReason, g.version, g.stakeId, g.lastOnlineTickAt,
+          ],
+        )
+      }
+      await client.query('COMMIT')
+      return { first: true, grant: input.grant ?? null }
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
+  async putStake(stake: StakeRecord) {
+    await this.pool.query('INSERT INTO stakes (stake_id, match_id, spec, status) VALUES ($1,$2,$3,$4)', [
+      stake.stakeId, stake.matchId, JSON.stringify(stake.spec), stake.status,
+    ])
+  }
+  async listStakes(matchId: string) {
     const { rows } = await this.pool.query('SELECT * FROM stakes WHERE match_id = $1', [matchId])
     return rows.map(mapStake)
   }
-
-  async updateStake(stakeId: string, status: StakeRecord['status']): Promise<void> {
-    await this.pool.query('UPDATE stakes SET status = $2 WHERE stake_id = $1', [stakeId, status])
-  }
-
-  async putGrant(grant: GrantRecord): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO grants (grant_id, owner_device_id, winner_device_id, model, provider, calls_remaining,
-        online_ms_remaining, owner_online, status, version, stake_id, last_online_tick_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-      [
-        grant.grantId, grant.ownerDeviceId, grant.winnerDeviceId, grant.model, grant.provider,
-        grant.callsRemaining, grant.onlineMsRemaining, grant.ownerOnline, grant.status, grant.version,
-        grant.stakeId, grant.lastOnlineTickAt,
-      ],
-    )
-  }
-
-  async getGrant(grantId: string): Promise<GrantRecord | undefined> {
+  async getGrant(grantId: string) {
     const { rows } = await this.pool.query('SELECT * FROM grants WHERE grant_id = $1', [grantId])
     return rows[0] ? mapGrant(rows[0]) : undefined
   }
-
-  async listGrantsForWinner(deviceId: string): Promise<GrantRecord[]> {
+  async listGrantsForWinner(deviceId: string) {
     const { rows } = await this.pool.query('SELECT * FROM grants WHERE winner_device_id = $1', [deviceId])
     return rows.map(mapGrant)
   }
-
-  async saveGrant(grant: GrantRecord): Promise<void> {
+  async saveGrant(grant: GrantRecord) {
     await this.pool.query(
-      `UPDATE grants SET calls_remaining=$2, online_ms_remaining=$3, owner_online=$4, status=$5,
-        version=$6, last_online_tick_at=$7 WHERE grant_id=$1`,
+      `UPDATE grants SET calls_remaining=$2, active_concurrency=$3, online_ms_remaining=$4, owner_online=$5,
+        status=$6, status_reason=$7, version=$8, last_online_tick_at=$9 WHERE grant_id=$1`,
       [
-        grant.grantId, grant.callsRemaining, grant.onlineMsRemaining, grant.ownerOnline, grant.status,
-        grant.version, grant.lastOnlineTickAt,
+        grant.grantId, grant.callsRemaining, grant.activeConcurrency, grant.onlineMsRemaining, grant.ownerOnline,
+        grant.status, grant.statusReason, grant.version, grant.lastOnlineTickAt,
       ],
     )
   }
-
-  async reserveInference(record: InferenceRecord): Promise<'created' | 'duplicate'> {
+  async getInference(grantId: string, inferenceId: string) {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM inferences WHERE grant_id = $1 AND inference_id = $2',
+      [grantId, inferenceId],
+    )
+    return rows[0] ? mapInference(rows[0]) : undefined
+  }
+  async insertInference(record: InferenceCallV1) {
     try {
       await this.pool.query(
-        `INSERT INTO inferences (grant_id, inference_id, status, deducted, created_at)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [record.grantId, record.inferenceId, record.status, record.deducted, record.createdAt],
+        `INSERT INTO inferences (grant_id, inference_id, requester_device_id, owner_device_id, status, deducted,
+          request_hash, started_at, finished_at, terminal_reason)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [
+          record.grantId, record.inferenceId, record.requesterDeviceId, record.ownerDeviceId, record.status,
+          record.deducted, record.requestHash, record.startedAt, record.finishedAt, record.terminalReason,
+        ],
       )
       return 'created'
     } catch (error) {
@@ -164,44 +207,26 @@ export class PostgresStore implements ArenaStore {
       throw error
     }
   }
-
-  async getInference(grantId: string, inferenceId: string): Promise<InferenceRecord | undefined> {
-    const { rows } = await this.pool.query(
-      'SELECT * FROM inferences WHERE grant_id = $1 AND inference_id = $2',
-      [grantId, inferenceId],
-    )
-    return rows[0] ? mapInference(rows[0]) : undefined
-  }
-
-  async updateInference(grantId: string, inferenceId: string, patch: Partial<InferenceRecord>): Promise<InferenceRecord> {
-    const current = await this.getInference(grantId, inferenceId)
-    if (!current) throw new Error('inference not found')
-    const next = { ...current, ...patch }
+  async updateInference(record: InferenceCallV1) {
     await this.pool.query(
-      `UPDATE inferences SET status=$3, deducted=$4 WHERE grant_id=$1 AND inference_id=$2`,
-      [grantId, inferenceId, next.status, next.deducted],
+      `UPDATE inferences SET status=$3, deducted=$4, started_at=$5, finished_at=$6, terminal_reason=$7
+       WHERE grant_id=$1 AND inference_id=$2`,
+      [record.grantId, record.inferenceId, record.status, record.deducted, record.startedAt, record.finishedAt, record.terminalReason],
     )
-    return next
   }
-
-  async appendEvent(event: EventRecord): Promise<void> {
+  async appendEvent(matchId: string, seq: number, hash: string, payload: unknown) {
     await this.pool.query(
-      `INSERT INTO match_events (match_id, seq, hash, payload) VALUES ($1,$2,$3,$4)`,
-      [event.matchId, event.seq, event.hash, JSON.stringify(event.payload)],
+      'INSERT INTO match_events (match_id, seq, hash, payload) VALUES ($1,$2,$3,$4)',
+      [matchId, seq, hash, JSON.stringify(payload)],
     )
   }
-
-  async listEvents(matchId: string): Promise<EventRecord[]> {
-    const { rows } = await this.pool.query(
-      'SELECT * FROM match_events WHERE match_id = $1 ORDER BY seq ASC',
-      [matchId],
-    )
-    return rows.map((row) => ({
-      matchId: row.match_id,
-      seq: row.seq,
-      hash: row.hash,
-      payload: row.payload,
-    }))
+  async listEvents(matchId: string) {
+    const { rows } = await this.pool.query('SELECT * FROM match_events WHERE match_id = $1 ORDER BY seq', [matchId])
+    return rows.map((row) => ({ seq: row.seq, hash: row.hash, payload: row.payload }))
+  }
+  async ping() {
+    const { rows } = await this.pool.query('SELECT 1 AS ok')
+    return rows[0]?.ok === 1
   }
 }
 
@@ -214,7 +239,9 @@ function mapDevice(row: Record<string, unknown>): DeviceRecord {
     lastSeenAt: Number(row.last_seen_at),
   }
 }
-
+function asJson<T>(value: unknown): T {
+  return (typeof value === 'string' ? JSON.parse(value) : value) as T
+}
 function mapRoom(row: Record<string, unknown>): RoomRecord {
   return {
     roomId: String(row.room_id),
@@ -229,32 +256,26 @@ function mapRoom(row: Record<string, unknown>): RoomRecord {
     status: row.status as RoomRecord['status'],
   }
 }
-
 function mapMatch(row: Record<string, unknown>): MatchRecord {
   return {
     matchId: String(row.match_id),
     roomId: String(row.room_id),
-    buttonDeviceId: String(row.button_device_id),
-    bbDeviceId: String(row.bb_device_id),
-    serverSeedHex: String(row.server_seed_hex),
+    deviceA: String(row.device_a),
+    deviceB: String(row.device_b),
     commitment: String(row.commitment),
-    playerEntropy: asJson(row.player_entropy),
+    serverSeedHex: String(row.server_seed_hex),
+    entropyA: row.entropy_a ? String(row.entropy_a) : null,
+    entropyB: row.entropy_b ? String(row.entropy_b) : null,
     status: row.status as MatchRecord['status'],
     winnerDeviceId: row.winner_device_id ? String(row.winner_device_id) : null,
     settled: Boolean(row.settled),
+    state: row.state ? asJson(row.state) : null,
     createdAt: Number(row.created_at),
   }
 }
-
 function mapStake(row: Record<string, unknown>): StakeRecord {
-  return {
-    stakeId: String(row.stake_id),
-    matchId: String(row.match_id),
-    spec: asJson(row.spec),
-    status: row.status as StakeRecord['status'],
-  }
+  return { stakeId: String(row.stake_id), matchId: String(row.match_id), spec: asJson(row.spec), status: row.status as StakeRecord['status'] }
 }
-
 function mapGrant(row: Record<string, unknown>): GrantRecord {
   return {
     grantId: String(row.grant_id),
@@ -263,25 +284,27 @@ function mapGrant(row: Record<string, unknown>): GrantRecord {
     model: String(row.model),
     provider: String(row.provider),
     callsRemaining: Number(row.calls_remaining),
+    activeConcurrency: Number(row.active_concurrency),
     onlineMsRemaining: Number(row.online_ms_remaining),
     ownerOnline: Boolean(row.owner_online),
     status: row.status as GrantRecord['status'],
+    statusReason: row.status_reason as GrantRecord['statusReason'],
     version: Number(row.version),
     stakeId: String(row.stake_id),
     lastOnlineTickAt: row.last_online_tick_at === null ? null : Number(row.last_online_tick_at),
   }
 }
-
-function mapInference(row: Record<string, unknown>): InferenceRecord {
+function mapInference(row: Record<string, unknown>): InferenceCallV1 {
   return {
     grantId: String(row.grant_id),
     inferenceId: String(row.inference_id),
-    status: row.status as InferenceRecord['status'],
+    requesterDeviceId: String(row.requester_device_id),
+    ownerDeviceId: String(row.owner_device_id),
+    status: row.status as InferenceCallV1['status'],
     deducted: Boolean(row.deducted),
-    createdAt: Number(row.created_at),
+    requestHash: String(row.request_hash),
+    startedAt: row.started_at === null ? null : Number(row.started_at),
+    finishedAt: row.finished_at === null ? null : Number(row.finished_at),
+    terminalReason: row.terminal_reason === null ? null : String(row.terminal_reason),
   }
-}
-
-function asJson<T>(value: unknown): T {
-  return (typeof value === 'string' ? JSON.parse(value) : value) as T
 }

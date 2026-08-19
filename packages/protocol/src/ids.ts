@@ -7,11 +7,12 @@ export type GrantId = Brand<string, 'GrantId'>
 export type StakeId = Brand<string, 'StakeId'>
 export type InferenceId = Brand<string, 'InferenceId'>
 export type MessageId = Brand<string, 'MessageId'>
-export type SessionToken = Brand<string, 'SessionToken'>
 export type InviteCode = Brand<string, 'InviteCode'>
 export type RoomCode = Brand<string, 'RoomCode'>
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const CROCKFORD_RE = /^[0-9A-HJKMNP-TV-Z]+$/
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 
 export function uuidv7(): string {
   const bytes = new Uint8Array(16)
@@ -46,29 +47,13 @@ export const StakeId = (value: string): StakeId => brand(value, 'StakeId')
 export const InferenceId = (value: string): InferenceId => brand(value, 'InferenceId')
 export const MessageId = (value: string): MessageId => brand(value, 'MessageId')
 
-export function newDeviceId(): DeviceId {
-  return DeviceId(uuidv7())
-}
-export function newRoomId(): RoomId {
-  return RoomId(uuidv7())
-}
-export function newMatchId(): MatchId {
-  return MatchId(uuidv7())
-}
-export function newGrantId(): GrantId {
-  return GrantId(uuidv7())
-}
-export function newStakeId(): StakeId {
-  return StakeId(uuidv7())
-}
-export function newInferenceId(): InferenceId {
-  return InferenceId(uuidv7())
-}
-export function newMessageId(): MessageId {
-  return MessageId(uuidv7())
-}
-
-const CROCKFORD_RE = /^[0-9A-HJKMNP-TV-Z]+$/
+export function newDeviceId(): DeviceId { return DeviceId(uuidv7()) }
+export function newRoomId(): RoomId { return RoomId(uuidv7()) }
+export function newMatchId(): MatchId { return MatchId(uuidv7()) }
+export function newGrantId(): GrantId { return GrantId(uuidv7()) }
+export function newStakeId(): StakeId { return StakeId(uuidv7()) }
+export function newInferenceId(): InferenceId { return InferenceId(uuidv7()) }
+export function newMessageId(): MessageId { return MessageId(uuidv7()) }
 
 export function RoomCode(value: string): RoomCode {
   if (value.length !== 6 || !CROCKFORD_RE.test(value)) throw new Error('room code must be 6 Crockford characters')
@@ -81,8 +66,6 @@ export function InviteCode(value: string): InviteCode {
   }
   return value as InviteCode
 }
-
-const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
 
 export function randomCrockford(length: number): string {
   const bytes = new Uint8Array(length)

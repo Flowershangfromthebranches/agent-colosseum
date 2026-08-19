@@ -1,21 +1,9 @@
-import {
-  commitServerSeed,
-  deriveHandDeck,
-  generateDeviceKeypair,
-  randomBytes,
-  signUtf8,
-  toHex,
-  type DeviceKeypair,
-} from '@agent-colosseum/crypto'
-import { playScriptedMatch, PokerEngine, type PublicMatchSnapshot } from '@agent-colosseum/poker'
-import {
-  defaultStakeSpec,
-  newDeviceId,
-  PINNED_DSH_VERSION,
-  PROVIDER_ID,
-  type Grant,
-} from '@agent-colosseum/protocol'
+import { PINNED_DSH_VERSION, defaultStakeSpec, uuidv7 } from '@agent-colosseum/protocol'
+import { generateDeviceKeypair, signStake, toHex, randomBytes } from '@agent-colosseum/crypto'
 import { ArenaAgentRunner, type AgentsLike } from './agent-runner.ts'
+import { ArenaConnection } from './connection.ts'
+import { runLocalMatch } from './local-match.ts'
+import { SnapshotStore } from './snapshot-store.ts'
 import { assertCompatible } from './compat.ts'
 
 export interface PluginConfig {
@@ -24,165 +12,107 @@ export interface PluginConfig {
   allowUnverifiedDsh: boolean
 }
 
-export interface ArenaUiState {
-  view: 'privacy' | 'lobby' | 'table' | 'result' | 'grants'
-  privacyAcknowledged: boolean
-  deviceId: string
-  dshVersion: string
-  serverReachable: boolean
-  ownerOnline: boolean
-  roomCode?: string
-  roomId?: string
-  match?: PublicMatchSnapshot
-  result?: { winner?: string; reason?: string }
-  grants: Grant[]
-  localModels: Array<{ provider: string; model: string; name: string; allowedForStake: boolean }>
-  relay?: { grantId?: string; status?: string }
-  disclosure: string
-}
-
-const DISCLOSURE = 'The model owner can theoretically inspect relayed prompt text. Never send unauthorized secrets through a grant model.'
-
 export class ArenaRuntime {
-  deviceId = ''
-  keys: DeviceKeypair | null = null
-  privacyAcknowledged = false
-  grants: Grant[] = []
-  localEngine: PokerEngine | null = null
-  cursor = 0
-  models: ArenaUiState['localModels'] = []
-  listeners = new Set<(state: ArenaUiState) => void>()
+  readonly store = new SnapshotStore()
   readonly runner: ArenaAgentRunner
-  private grantListeners = new Set<() => void>()
+  connection: ArenaConnection | null = null
+  private localAbort: AbortController | null = null
+  readonly grantListeners = new Set<() => void>()
 
   constructor(
-    private readonly agents: AgentsLike,
+    agents: AgentsLike,
     readonly config: PluginConfig,
-    private readonly listLocalModels: () => Promise<ArenaUiState['localModels']>,
-    private readonly credentials?: {
-      resolve(ref: string): Promise<{ value: string } | undefined>
-      set(ref: string, value: string): Promise<void>
-    },
+    private readonly listLocalModels: () => Promise<Array<{ provider: string; model: string; name: string; allowedForStake: boolean }>>,
+    private readonly credentials?: { resolve(ref: string): Promise<{ value: string } | undefined>; set(ref: string, value: string): Promise<void> },
   ) {
-    this.runner = new ArenaAgentRunner({
-      agents,
-      waitForOutput: async (agent) => {
-        await agent.whenIdle()
-        return ''
-      },
-    })
-  }
-
-  onGrantsChanged(listener: () => void): () => void {
-    this.grantListeners.add(listener)
-    return () => this.grantListeners.delete(listener)
+    this.runner = new ArenaAgentRunner(agents)
   }
 
   async start(): Promise<void> {
-    assertCompatible(this.config.allowUnverifiedDsh)
-    await this.loadOrCreateKeys()
+    const version = assertCompatible(this.config.allowUnverifiedDsh)
+    this.store.patch({ dshVersion: version, compatible: true })
+    this.connection = new ArenaConnection(this.config.serverUrl, this.config.inviteCode, this.store, this.credentials)
+    if (this.config.serverUrl) await this.connection.start()
   }
 
-  async bootstrap(): Promise<ArenaUiState> {
-    if (!this.deviceId) await this.start()
-    this.models = await this.listLocalModels()
-    return this.snapshot()
+  async bootstrap() {
+    if (!this.store.snapshot.dshVersion) await this.start()
+    const models = (await this.listLocalModels()).filter((item) => item.provider !== 'script')
+    return this.store.patch({ models })
   }
 
-  ackPrivacy(): ArenaUiState {
-    this.privacyAcknowledged = true
-    return this.snapshot()
+  ackPrivacy() {
+    return this.store.patch({ privacyAcknowledged: true, view: 'lobby' })
   }
 
-  async startLocal(input: {
-    left: { provider: string; model: string }
-    right: { provider: string; model: string }
-  }): Promise<ArenaUiState> {
-    const matchId = `local-${Date.now()}`
-    const button = this.deviceId
-    const bb = newDeviceId()
-    if (input.left.provider === 'script' && input.right.provider === 'script') {
-      const played = playScriptedMatch({
-        matchId,
-        buttonDeviceId: button,
-        bbDeviceId: bb,
-        buttonPolicy: 'check-fold',
-        bbPolicy: 'call-station',
-      })
-      this.localEngine = played.engine
-      return this.snapshot({
-        view: 'result',
-        result: {
-          ...played.terminal.winnerDeviceId ? { winner: played.terminal.winnerDeviceId } : {},
-          reason: played.terminal.reason,
-        },
-        match: played.engine.snapshot(),
-      })
-    }
-    const engine = new PokerEngine({
-      matchId,
-      buttonDeviceId: button,
-      bbDeviceId: bb,
+  async startLocal(left: { provider: string; model: string }, right: { provider: string; model: string }) {
+    this.localAbort?.abort()
+    this.localAbort = new AbortController()
+    const deviceA = this.store.snapshot.deviceId && this.store.snapshot.deviceId.includes('-')
+      ? this.store.snapshot.deviceId
+      : uuidv7()
+    await runLocalMatch({
+      store: this.store,
+      runner: this.runner,
+      deviceA,
+      left,
+      right,
+      signal: this.localAbort.signal,
     })
-    const seed = commitServerSeed()
-    const entropy: [string, string] = [toHex(randomBytes(32)), toHex(randomBytes(32))]
-    await this.runner.createContestant({ key: 'left', ...input.left })
-    await this.runner.createContestant({ key: 'right', ...input.right })
-    const deck = deriveHandDeck({
-      matchId,
-      handNo: 1,
-      serverSeedHex: seed.serverSeedHex,
-      playerEntropy: entropy,
-    })
-    engine.startHand(deck)
-    this.localEngine = engine
-    return this.snapshot({ view: 'table', match: engine.snapshot() })
+    return this.store.snapshot
   }
 
-  setGrants(grants: Grant[]): void {
-    this.grants = grants
+  async cancelLocal() {
+    this.localAbort?.abort()
+    await this.runner.dispose()
+    return this.store.patch({ view: 'lobby', match: undefined, result: undefined })
+  }
+
+  async createRoom(provider: string, model: string) {
+    const keys = this.connection?.keys ?? generateDeviceKeypair()
+    const deviceId = this.store.snapshot.deviceId ?? 'pending'
+    const unsigned = defaultStakeSpec(deviceId, provider, model, toHex(randomBytes(16)), 'pending')
+    const stake = { ...unsigned, signature: signStake(keys.ed25519PrivateKey, unsigned) }
+    this.connection?.send('room.create', { stake })
+    return this.store.patch({ view: 'room' })
+  }
+
+  joinRoom(roomCode: string, provider: string, model: string) {
+    const keys = this.connection?.keys ?? generateDeviceKeypair()
+    const deviceId = this.store.snapshot.deviceId ?? 'pending'
+    const unsigned = defaultStakeSpec(deviceId, provider, model, toHex(randomBytes(16)), 'pending')
+    const stake = { ...unsigned, signature: signStake(keys.ed25519PrivateKey, unsigned) }
+    this.connection?.send('room.join', { roomCode, stake })
+    return this.store.patch({ view: 'room', roomCode })
+  }
+
+  acceptRoom() {
+    const roomId = this.store.snapshot.roomId
+    if (!roomId) throw new Error('no room')
+    const keys = this.connection?.keys ?? generateDeviceKeypair()
+    const deviceId = this.store.snapshot.deviceId ?? 'pending'
+    const model = this.store.snapshot.models[0]
+    const unsigned = defaultStakeSpec(deviceId, model?.provider ?? 'openai-compatible', model?.model ?? 'local', toHex(randomBytes(16)), 'pending')
+    const stake = { ...unsigned, signature: signStake(keys.ed25519PrivateKey, unsigned) }
+    this.connection?.send('room.accept', { roomId, stake })
+    return this.store.snapshot
+  }
+
+  leaveRoom() {
+    if (this.store.snapshot.roomId) this.connection?.send('room.leave', { roomId: this.store.snapshot.roomId })
+    return this.store.patch({ view: 'lobby', roomId: undefined, roomCode: undefined })
+  }
+
+  setGrants(grants: unknown[]) {
+    this.store.patch({ grants })
     for (const listener of this.grantListeners) listener()
   }
 
-  snapshot(overrides: Partial<ArenaUiState> = {}): ArenaUiState {
-    const match = overrides.match ?? this.localEngine?.snapshot()
-    return {
-      view: overrides.view ?? (this.privacyAcknowledged ? 'lobby' : 'privacy'),
-      privacyAcknowledged: this.privacyAcknowledged,
-      deviceId: this.deviceId,
-      dshVersion: PINNED_DSH_VERSION,
-      serverReachable: overrides.serverReachable ?? false,
-      ownerOnline: overrides.ownerOnline ?? true,
-      grants: overrides.grants ?? this.grants,
-      localModels: overrides.localModels ?? this.models,
-      disclosure: DISCLOSURE,
-      ...overrides.privacyAcknowledged === undefined ? {} : { privacyAcknowledged: overrides.privacyAcknowledged },
-      ...match === undefined ? {} : { match },
-      ...overrides.roomCode === undefined ? {} : { roomCode: overrides.roomCode },
-      ...overrides.roomId === undefined ? {} : { roomId: overrides.roomId },
-      ...overrides.result === undefined ? {} : { result: overrides.result },
-      ...overrides.relay === undefined ? {} : { relay: overrides.relay },
-    }
-  }
-
-  private async loadOrCreateKeys(): Promise<void> {
-    const ref = 'AGENT_COLOSSEUM_DEVICE_KEYS'
-    const existing = await this.credentials?.resolve(ref)
-    if (existing?.value) {
-      this.keys = JSON.parse(existing.value) as DeviceKeypair
-      this.deviceId = this.keys.deviceId
-      return
-    }
-    this.deviceId = newDeviceId()
-    this.keys = generateDeviceKeypair(this.deviceId)
-    await this.credentials?.set(ref, JSON.stringify(this.keys))
-  }
-
-  signStake(provider: string, model: string) {
-    const unsigned = defaultStakeSpec(this.deviceId, provider, model, 'pending')
-    const signature = this.keys ? signUtf8(this.keys.ed25519PrivateKey, JSON.stringify({ ...unsigned, signature: undefined })) : 'local'
-    return { ...unsigned, signature }
+  async dispose() {
+    this.localAbort?.abort()
+    this.connection?.stop()
+    await this.runner.dispose()
   }
 }
 
-export { PROVIDER_ID }
+export { PINNED_DSH_VERSION }

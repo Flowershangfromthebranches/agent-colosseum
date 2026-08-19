@@ -1,43 +1,52 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { RPC_CHANNEL } from '@agent-colosseum/protocol'
 
-type ArenaState = {
-  view: 'privacy' | 'lobby' | 'table' | 'result' | 'grants'
+type Snapshot = {
+  view: 'privacy' | 'lobby' | 'room' | 'table' | 'result' | 'grants' | 'relay'
   privacyAcknowledged: boolean
-  deviceId: string
+  deviceId: string | null
   dshVersion: string
-  serverReachable: boolean
+  connectionState: string
   ownerOnline: boolean
   roomCode?: string
+  disclosure: string
+  error?: string
+  models: Array<{ provider: string; model: string; name: string; allowedForStake: boolean }>
   match?: {
-    handNo: number
-    street: string
-    pot: number
-    board: string[]
-    stacks: { button: number; bb: number }
-    legal: Array<{ action: string }>
-    toAct: string | null
+    handNo?: number
+    street?: string
+    pot?: number
+    board?: string[]
+    currentBet?: number
+    toAct?: string | null
+    blinds?: { small: number; big: number }
+    seats?: Record<string, { stack: number }>
+    lastActions?: Array<{ publicRationale?: string }>
   }
   result?: { winner?: string; reason?: string }
-  grants: Array<{
-    grantId: string
-    model: string
-    callsRemaining: number
-    ownerOnline: boolean
-    status: string
-    onlineMsRemaining: number
-  }>
-  localModels: Array<{ provider: string; model: string; name: string; allowedForStake: boolean }>
-  disclosure: string
+  grants: Array<{ grantId: string; model: string; callsRemaining: number; ownerOnline: boolean; status: string; statusReason?: string; onlineMsRemaining: number }>
+  relay?: { status?: string; error?: string }
 }
 
-type Rpc = {
-  call(channel: string, endpoint: string, payload: unknown): Promise<{ ok: boolean; value?: unknown; error?: { message: string } }>
+type Rpc = { call(channel: string, endpoint: string, payload: unknown): Promise<{ ok: boolean; value?: unknown; error?: { message: string } }> }
+
+const clientUi = {
+  open: false,
+  listeners: new Set<() => void>(),
+  set(open: boolean) {
+    this.open = open
+    for (const listener of this.listeners) listener()
+  },
 }
 
-export function ArenaOverlay(props: { wide?: boolean; rpc: Rpc; onClose?: () => void }) {
-  const [open, setOpen] = useState(false)
-  const [state, setState] = useState<ArenaState | null>(null)
+export function ArenaApp(props: { rpc: Rpc; wide?: boolean; mode: 'launcher' | 'overlay' }) {
+  const [open, setOpen] = useState(clientUi.open)
+  useEffect(() => {
+    const sync = () => setOpen(clientUi.open)
+    clientUi.listeners.add(sync)
+    return () => { clientUi.listeners.delete(sync) }
+  }, [])
+  const [state, setState] = useState<Snapshot | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [left, setLeft] = useState('')
   const [right, setRight] = useState('')
@@ -51,183 +60,122 @@ export function ArenaOverlay(props: { wide?: boolean; rpc: Rpc; onClose?: () => 
 
   useEffect(() => {
     if (!open) return
-    let cancelled = false
-    const poll = async () => {
-      try {
-        const value = await call('events.poll', { cursor: 0, timeoutMs: 1000 }) as { events?: Array<{ state?: ArenaState }> }
-        const next = value.events?.at(-1)?.state
-        if (next && !cancelled) setState(next)
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err))
-      }
-    }
-    void call('bootstrap').then((value) => setState(value as ArenaState)).catch((err) => setError(String(err)))
-    const timer = setInterval(() => void poll(), 1500)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
+    let live = true
+    void call('bootstrap').then((value) => { if (live) setState(value as Snapshot) }).catch((err: Error) => setError(err.message))
+    const timer = setInterval(() => {
+      void call('events.poll', { cursor: 0, timeoutMs: 1000 }).then((value) => {
+        const next = (value as { events?: Array<{ state?: Snapshot }> }).events?.at(-1)?.state
+        if (next && live) setState(next)
+      }).catch(() => undefined)
+    }, 1500)
+    return () => { live = false; clearInterval(timer) }
   }, [open])
 
-  const models = state?.localModels ?? []
-  const leftValue = left || models[0] ? `${models[0]?.provider ?? ''}:${models[0]?.model ?? ''}` : ''
-  const parsed = (value: string) => {
-    const [provider, model] = value.split(':')
-    return { provider: provider || 'script', model: model || 'script-a' }
-  }
-
-  if (!open) {
+  if (props.mode === 'launcher') {
     return (
-      <button type="button" className="ac-launch" onClick={() => setOpen(true)} style={launchStyle(props.wide)}>
+      <button type="button" className="ac-open" onClick={() => clientUi.set(true)} style={btn}>
         {props.wide ? 'Colosseum' : 'AC'}
       </button>
     )
   }
 
+  if (!open) return null
+
+  const models = state?.models ?? []
+  const parse = (value: string) => {
+    const [provider, model] = value.split(':')
+    return { provider: provider || models[0]?.provider || 'openai-compatible', model: model || models[0]?.model || 'local' }
+  }
+
   return (
-    <div style={shellStyle} role="dialog" aria-label="Agent Colosseum">
-      <header style={headerStyle}>
+    <div role="dialog" aria-modal="true" aria-label="Agent Colosseum" style={shell}>
+      <header style={header}>
         <strong>Agent Colosseum</strong>
-        <button type="button" onClick={() => { setOpen(false); props.onClose?.() }}>Close</button>
+        <span>{state?.connectionState ?? 'idle'}</span>
+        <button type="button" onClick={() => clientUi.set(false)}>Close</button>
       </header>
-      {error && <p style={{ color: '#b42318' }}>{error}</p>}
-      {!state && <p>Loading host state…</p>}
+      {error ? <p role="alert">{error}</p> : null}
+      {state?.error ? <p role="alert">{state.error}</p> : null}
+      {state && (
+        <nav style={nav}>
+          {(['lobby', 'room', 'table', 'result', 'grants', 'relay'] as const).map((view) => (
+            <button key={view} type="button" onClick={() => setState({ ...state, view })}>{view}</button>
+          ))}
+        </nav>
+      )}
       {state?.view === 'privacy' && (
         <section>
           <h2>Privacy</h2>
           <p>{state.disclosure}</p>
-          <p>This plugin never reads, uploads, or forwards API keys. Device private keys stay in DSH credentials.</p>
-          <button type="button" onClick={async () => setState(await call('privacy.ack') as ArenaState)}>I understand</button>
+          <button type="button" onClick={async () => setState(await call('privacy.ack') as Snapshot)}>I understand / 我已了解</button>
         </section>
-      )}
-      {state && state.view !== 'privacy' && (
-        <nav style={navStyle}>
-          <button type="button" onClick={() => setState({ ...state, view: 'lobby' })}>Lobby</button>
-          <button type="button" onClick={() => setState({ ...state, view: 'grants' })}>Grants</button>
-        </nav>
       )}
       {state?.view === 'lobby' && (
         <section>
-          <h2>Local practice</h2>
-          <label>Left model
-            <select value={left || leftValue} onChange={(event: { target: { value: string } }) => setLeft(event.target.value)}>
-              {models.map((model) => (
-                <option key={`${model.provider}:${model.model}`} value={`${model.provider}:${model.model}`}>
-                  {model.name}{model.allowedForStake ? '' : ' (practice only)'}
-                </option>
-              ))}
-              <option value="script:script-a">script / check-fold</option>
-              <option value="script:script-b">script / call-station</option>
+          <h2>Lobby</h2>
+          <label>Left
+            <select value={left} onChange={(event: { target: { value: string } }) => setLeft(event.target.value)}>
+              {models.map((model) => <option key={`l-${model.provider}:${model.model}`} value={`${model.provider}:${model.model}`}>{model.name}</option>)}
             </select>
           </label>
-          <label>Right model
-            <select value={right || 'script:script-b'} onChange={(event: { target: { value: string } }) => setRight(event.target.value)}>
-              {models.map((model) => (
-                <option key={`r-${model.provider}:${model.model}`} value={`${model.provider}:${model.model}`}>
-                  {model.name}
-                </option>
-              ))}
-              <option value="script:script-a">script / check-fold</option>
-              <option value="script:script-b">script / call-station</option>
+          <label>Right
+            <select value={right} onChange={(event: { target: { value: string } }) => setRight(event.target.value)}>
+              {models.map((model) => <option key={`r-${model.provider}:${model.model}`} value={`${model.provider}:${model.model}`}>{model.name}</option>)}
             </select>
           </label>
-          <button type="button" onClick={async () => {
-            setState(await call('match.local.start', { left: parsed(left || 'script:script-a'), right: parsed(right || 'script:script-b') }) as ArenaState)
-          }}>Start local match</button>
-          <h2>Friend room</h2>
-          <p>Create a room on the Arena Server, then share the six-character code. Both sides confirm the same 10-call stake.</p>
-          <button type="button" onClick={async () => {
-            const created = await call('room.create', parsed(left || 'script:script-a')) as { stake?: unknown }
-            setState({ ...state, view: 'lobby', roomCode: 'pending server' })
-            void created
-          }}>Create room</button>
-          <label>Join code
-            <input value={roomCode} onChange={(event: { target: { value: string } }) => setRoomCode(event.target.value.toUpperCase())} maxLength={6} />
-          </label>
-          <button type="button" onClick={async () => {
-            await call('room.join', { roomCode, ...parsed(left || 'script:script-a') })
-          }}>Join</button>
+          <button type="button" onClick={async () => setState(await call('match.local.start', { left: parse(left), right: parse(right) }) as Snapshot)}>Start local match</button>
+          <h3>Friend room</h3>
+          <button type="button" onClick={async () => setState(await call('room.create', parse(left)) as Snapshot)}>Create room</button>
+          <input aria-label="Room code" value={roomCode} maxLength={6} onChange={(event: { target: { value: string } }) => setRoomCode(event.target.value.toUpperCase())} />
+          <button type="button" onClick={async () => setState(await call('room.join', { roomCode, ...parse(left) }) as Snapshot)}>Join</button>
+        </section>
+      )}
+      {state?.view === 'room' && (
+        <section>
+          <h2>Room {state.roomCode}</h2>
+          <p>Confirm both models and the 10-call stake before accepting.</p>
+          <button type="button" onClick={async () => setState(await call('room.accept') as Snapshot)}>Accept</button>
+          <button type="button" onClick={async () => setState(await call('room.leave') as Snapshot)}>Leave</button>
         </section>
       )}
       {state?.view === 'table' && state.match && (
         <section>
           <h2>Hand {state.match.handNo} · {state.match.street}</h2>
-          <p>Board: {state.match.board.join(' ') || '(preflop)'}</p>
-          <p>Pot {state.match.pot} · BTN {state.match.stacks.button} · BB {state.match.stacks.bb}</p>
+          <p>Blinds {state.match.blinds?.small}/{state.match.blinds?.big} · Pot {state.match.pot} · Bet {state.match.currentBet}</p>
+          <p>Board: {(state.match.board ?? []).join(' ') || '(preflop)'}</p>
+          <p>Stacks: {Object.entries(state.match.seats ?? {}).map(([seat, info]) => `${seat} ${info.stack}`).join(' · ')}</p>
           <p>To act: {state.match.toAct ?? '—'}</p>
+          <p>{state.match.lastActions?.at(-1)?.publicRationale}</p>
         </section>
       )}
       {state?.view === 'result' && (
         <section>
           <h2>Result</h2>
-          <p>{state.result?.reason} {state.result?.winner ? `· winner ${state.result.winner}` : ''}</p>
+          <p>{state.result?.reason} {state.result?.winner ?? ''}</p>
         </section>
       )}
       {state?.view === 'grants' && (
         <section>
           <h2>Grant inventory</h2>
-          {state.grants.length === 0 && <p>No grants yet.</p>}
-          <ul>
-            {state.grants.map((grant) => (
-              <li key={grant.grantId}>
-                {grant.model} · {grant.callsRemaining} calls · {grant.ownerOnline ? 'owner online' : 'unavailable (TTL paused)'} · {grant.status}
-              </li>
-            ))}
-          </ul>
-          <p>Relay uses the owner&apos;s existing <code>ctx.llm.stream()</code>. Keys never leave their machine.</p>
+          {state.grants.length === 0 ? <p>No grants.</p> : (
+            <ul>{state.grants.map((grant) => (
+              <li key={grant.grantId}>{grant.model} · {grant.callsRemaining} · {grant.ownerOnline ? 'online' : 'unavailable'} · {grant.statusReason ?? grant.status}</li>
+            ))}</ul>
+          )}
         </section>
       )}
-      <footer style={{ opacity: 0.7, marginTop: 24, fontSize: 12 }}>
-        Device {state?.deviceId || '…'} · DSH {state?.dshVersion} · no cash, credits, or transfers
-      </footer>
+      {state?.view === 'relay' && (
+        <section>
+          <h2>Relay</h2>
+          <p>{state.relay?.status ?? 'idle'} {state.relay?.error ?? ''}</p>
+        </section>
+      )}
+      <footer style={{ opacity: 0.7, fontSize: 12 }}>Device {state?.deviceId ?? '…'} · DSH {state?.dshVersion} · no cash</footer>
     </div>
   )
 }
 
-export function ArenaFooterAction(props: { wide: boolean; rpc: Rpc }) {
-  return <ArenaOverlay wide={props.wide} rpc={props.rpc} />
-}
-
-type Css = Record<string, string | number>
-
-const launchStyle = (wide?: boolean): Css => ({
-  pointerEvents: 'auto',
-  border: '1px solid #d0d5dd',
-  background: '#fff',
-  borderRadius: 8,
-  padding: wide ? '8px 12px' : 8,
-  cursor: 'pointer',
-})
-
-const shellStyle: Css = {
-  pointerEvents: 'auto',
-  position: 'fixed',
-  inset: 16,
-  maxWidth: 720,
-  margin: '0 auto',
-  background: '#fffaf3',
-  color: '#1a1a1a',
-  border: '1px solid #d6c7b2',
-  borderRadius: 16,
-  padding: 20,
-  overflow: 'auto',
-  boxShadow: '0 16px 60px rgba(0,0,0,.18)',
-  zIndex: 40,
-}
-
-const headerStyle: Css = {
-  display: 'flex',
-  justifyContent: 'space-between',
-  alignItems: 'center',
-  marginBottom: 16,
-}
-
-const navStyle: Css = { display: 'flex', gap: 8, marginBottom: 12 }
-
-export function useRpcFromCtx(ctx: { connection?: { rpc: Rpc } }): Rpc {
-  return useMemo(() => ctx.connection?.rpc ?? {
-    async call() {
-      return { ok: false, error: { message: 'connection rpc unavailable' } }
-    },
-  }, [ctx.connection])
-}
+const btn: Record<string, string | number> = { pointerEvents: 'auto', border: '1px solid var(--dsh-border, #ccc)', background: 'var(--dsh-surface, #fff)', borderRadius: 8, padding: 8 }
+const shell: Record<string, string | number> = { pointerEvents: 'auto', position: 'fixed', inset: 16, maxWidth: 760, margin: '0 auto', background: 'var(--dsh-bg, #fffaf3)', color: 'var(--dsh-fg, #1a1a1a)', border: '1px solid var(--dsh-border, #d6c7b2)', borderRadius: 16, padding: 20, overflow: 'auto', zIndex: 40 }
+const header: Record<string, string | number> = { display: 'flex', justifyContent: 'space-between', gap: 12 }
+const nav: Record<string, string | number> = { display: 'flex', flexWrap: 'wrap', gap: 6, margin: '12px 0' }

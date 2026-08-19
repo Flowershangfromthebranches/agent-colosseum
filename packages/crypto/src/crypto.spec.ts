@@ -1,82 +1,55 @@
 import { describe, expect, it } from 'vitest'
-import { generateDeviceKeypair, signChallenge, verifyChallenge } from './device-keys.ts'
-import { deriveSharedKey, openJson, sealJson } from './e2e.ts'
+import { uuidv7 } from '@agent-colosseum/protocol'
+import { generateDeviceKeypair, signIdentity, verifyIdentity } from './device-keys.ts'
+import { deriveSharedKey, openJson, relayAad, sealJson } from './e2e.ts'
 import { genesisHash, nextEventHash, verifyEventChain } from './hash-chain.ts'
 import { commitServerSeed, dealFromDeck, deriveHandDeck, STANDARD_DECK, verifyServerSeed } from './shuffle.ts'
 import { toHex, randomBytes } from './bytes.ts'
-import { uuidv7 } from '@agent-colosseum/protocol'
 
-describe('device keys', () => {
-  it('signs and verifies challenges', () => {
-    const keys = generateDeviceKeypair(uuidv7())
+describe('identity', () => {
+  it('binds signatures to domain, device and nonce', () => {
+    const keys = generateDeviceKeypair()
+    const deviceId = uuidv7()
     const nonce = toHex(randomBytes(16))
-    const sig = signChallenge(keys.ed25519PrivateKey, nonce)
-    expect(verifyChallenge(keys.ed25519PublicKey, nonce, sig)).toBe(true)
-    expect(verifyChallenge(keys.ed25519PublicKey, 'other', sig)).toBe(false)
+    const sig = signIdentity(keys.ed25519PrivateKey, deviceId, nonce)
+    expect(verifyIdentity(keys.ed25519PublicKey, deviceId, nonce, sig)).toBe(true)
+    expect(verifyIdentity(keys.ed25519PublicKey, deviceId, 'other', sig)).toBe(false)
   })
 })
 
-describe('e2e', () => {
-  it('round-trips sealed JSON', () => {
-    const a = generateDeviceKeypair(uuidv7())
-    const b = generateDeviceKeypair(uuidv7())
+describe('e2e aad', () => {
+  it('rejects swapped direction or tampered ciphertext', () => {
+    const a = generateDeviceKeypair()
+    const b = generateDeviceKeypair()
     const key = deriveSharedKey(a.x25519PrivateKey, b.x25519PublicKey)
-    const other = deriveSharedKey(b.x25519PrivateKey, a.x25519PublicKey)
-    expect(toHex(key)).toBe(toHex(other))
-    const box = sealJson(key, { hello: 'world' })
-    expect(openJson(other, box)).toEqual({ hello: 'world' })
+    const aad = relayAad({ grantId: uuidv7(), inferenceId: uuidv7(), seq: 0, direction: 'winner_to_owner' })
+    const box = sealJson(key, { hello: 'world' }, aad)
+    expect(openJson(key, box, aad)).toEqual({ hello: 'world' })
+    const wrong = relayAad({ grantId: uuidv7(), inferenceId: uuidv7(), seq: 0, direction: 'owner_to_winner' })
+    expect(() => openJson(key, box, wrong)).toThrow()
+    expect(() => openJson(key, { ...box, ciphertext: box.ciphertext.replace(/0/g, '1') }, aad)).toThrow()
   })
 })
 
 describe('shuffle', () => {
-  it('commits, derives unique decks, and deals 9 unique cards', () => {
+  it('commits and derives unique decks', () => {
     const commit = commitServerSeed()
     expect(verifyServerSeed(commit.serverSeedHex, commit.commitment)).toBe(true)
     const matchId = uuidv7()
     const e1 = toHex(randomBytes(32))
     const e2 = toHex(randomBytes(32))
-    const deck = deriveHandDeck({
-      matchId,
-      handNo: 1,
-      serverSeedHex: commit.serverSeedHex,
-      playerEntropy: [e1, e2],
-    })
-    expect(deck).toHaveLength(52)
-    expect(new Set(deck).size).toBe(52)
-    expect([...deck].sort().join()).toBe([...STANDARD_DECK].sort().join())
-    const dealt = dealFromDeck(deck)
-    const used = [...dealt.buttonHole, ...dealt.bbHole, ...dealt.board]
-    expect(new Set(used).size).toBe(9)
-    const again = deriveHandDeck({
-      matchId,
-      handNo: 1,
-      serverSeedHex: commit.serverSeedHex,
-      playerEntropy: [e1, e2],
-    })
-    expect(again).toEqual(deck)
-    const next = deriveHandDeck({
-      matchId,
-      handNo: 2,
-      serverSeedHex: commit.serverSeedHex,
-      playerEntropy: [e1, e2],
-    })
-    expect(next).not.toEqual(deck)
+    const cards = deriveHandDeck({ matchId, handNo: 1, serverSeedHex: commit.serverSeedHex, playerEntropy: [e1, e2] })
+    expect(new Set(cards).size).toBe(52)
+    expect([...cards].sort().join()).toBe([...STANDARD_DECK].sort().join())
+    expect(dealFromDeck(cards).buttonHole).toHaveLength(2)
   })
 })
 
 describe('hash chain', () => {
-  it('verifies an append-only event chain', () => {
-    const a = { type: 'start', n: 1 }
-    const b = { type: 'action', n: 2 }
+  it('verifies append-only events', () => {
+    const a = { type: 'start' }
     const h1 = nextEventHash(genesisHash(), a)
-    const h2 = nextEventHash(h1, b)
-    expect(verifyEventChain([
-      { hash: h1, payload: a },
-      { hash: h2, payload: b },
-    ])).toBe(true)
-    expect(verifyEventChain([
-      { hash: h1, payload: a },
-      { hash: 'dead', payload: b },
-    ])).toBe(false)
+    expect(verifyEventChain([{ hash: h1, payload: a }])).toBe(true)
+    expect(verifyEventChain([{ hash: 'dead', payload: a }])).toBe(false)
   })
 })

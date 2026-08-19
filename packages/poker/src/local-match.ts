@@ -1,45 +1,54 @@
-import { commitServerSeed, deriveHandDeck, randomBytes, toHex } from '@agent-colosseum/crypto'
+import { deriveHandDeck, randomBytes, toHex } from '@agent-colosseum/crypto'
 import { MAX_HANDS } from '@agent-colosseum/protocol'
 import { PokerEngine } from './engine.ts'
 import { scriptDecide, type ScriptKind } from './script-policy.ts'
-import type { MatchTerminal } from './types.ts'
 
 export function playScriptedMatch(input: {
   matchId: string
-  buttonDeviceId: string
-  bbDeviceId: string
-  buttonPolicy?: ScriptKind
-  bbPolicy?: ScriptKind
-  serverSeedHex?: string
-  entropy?: [string, string]
-}): { terminal: MatchTerminal; engine: PokerEngine; serverSeedHex: string } {
-  const commit = input.serverSeedHex
-    ? { serverSeedHex: input.serverSeedHex, commitment: '' }
-    : commitServerSeed()
-  const entropy = input.entropy ?? [toHex(randomBytes(32)), toHex(randomBytes(32))]
-  const engine = new PokerEngine({
+  deviceA: string
+  deviceB: string
+  policyA?: ScriptKind
+  policyB?: ScriptKind
+  serverSeedHex: string
+  entropy: [string, string]
+  onSnapshot?: (engine: PokerEngine) => void
+}): { engine: PokerEngine } {
+  const firstDeck = deriveHandDeck({
     matchId: input.matchId,
-    buttonDeviceId: input.buttonDeviceId,
-    bbDeviceId: input.bbDeviceId,
+    handNo: 1,
+    serverSeedHex: input.serverSeedHex,
+    playerEntropy: input.entropy,
   })
-  while (!engine.terminal) {
+  const engine = PokerEngine.create({
+    matchId: input.matchId,
+    deviceA: input.deviceA,
+    deviceB: input.deviceB,
+    deck: firstDeck,
+  })
+  while (!engine.state.terminal) {
     const deck = deriveHandDeck({
       matchId: input.matchId,
-      handNo: engine.handNo + 1,
-      serverSeedHex: commit.serverSeedHex,
-      playerEntropy: entropy,
+      handNo: engine.state.handNo + 1,
+      serverSeedHex: input.serverSeedHex,
+      playerEntropy: input.entropy,
     })
     engine.startHand(deck)
-    while (engine.street !== 'complete' && !engine.terminal && engine.toAct) {
-      const seat = engine.toAct
-      const policy = seat === 'button' ? (input.buttonPolicy ?? 'check-fold') : (input.bbPolicy ?? 'call-station')
-      const decision = scriptDecide(policy, engine.legalActions(), engine.handNo)
+    input.onSnapshot?.(engine)
+    while (engine.state.street !== 'complete' && !engine.state.terminal && engine.state.toAct) {
+      const seat = engine.state.toAct
+      const policy = seat === 'A' ? (input.policyA ?? 'check-fold') : (input.policyB ?? 'call-station')
+      const decision = scriptDecide(policy, engine.legalActions(), engine.state.handNo)
       engine.apply(seat, decision.action, decision.raiseTo, decision.publicRationale)
+      input.onSnapshot?.(engine)
     }
-    if (engine.handNo >= MAX_HANDS && !engine.terminal && engine.players.button.stack === engine.players.bb.stack) {
+    if (engine.state.handNo >= MAX_HANDS && !engine.state.terminal && engine.state.players.A.stack === engine.state.players.B.stack) {
       continue
     }
     engine.maybeFinishMatch()
   }
-  return { terminal: engine.terminal!, engine, serverSeedHex: commit.serverSeedHex }
+  return { engine }
+}
+
+export function randomEntropyPair(): [string, string] {
+  return [toHex(randomBytes(32)), toHex(randomBytes(32))]
 }

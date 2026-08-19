@@ -2,24 +2,24 @@ services:
   postgres:
     image: postgres:17
     environment:
-      POSTGRES_USER: arena
-      POSTGRES_PASSWORD: arena
-      POSTGRES_DB: arena
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U arena -d arena']
+      test: ['CMD-SHELL', 'pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB']
       interval: 5s
       timeout: 5s
       retries: 20
 
   redis:
     image: redis:7
-    command: ['redis-server', '--appendonly', 'yes']
+    command: ['redis-server', '--appendonly', 'yes', '--requirepass', '${REDIS_PASSWORD}']
     volumes:
       - ./data/redis:/data
     healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
+      test: ['CMD', 'redis-cli', '-a', '${REDIS_PASSWORD}', 'ping']
       interval: 5s
       timeout: 3s
       retries: 20
@@ -29,20 +29,20 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.server
     environment:
-      DATABASE_URL: postgres://arena:arena@postgres:5432/arena
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       ARENA_HOST: 0.0.0.0
       ARENA_PORT: 8787
-      ARENA_INVITE_CODES: ${ARENA_INVITE_CODES:-}
-      ARENA_PROVIDER_ALLOWLIST: ${ARENA_PROVIDER_ALLOWLIST:-script,openai-compatible}
-      ARENA_PUBLIC_BASE_URL: ${ARENA_PUBLIC_BASE_URL:-https://arena.example.com}
+      ARENA_INVITE_HASHES: ${ARENA_INVITE_HASHES}
+      ARENA_PROVIDER_ALLOWLIST: ${ARENA_PROVIDER_ALLOWLIST}
+      ARENA_PUBLIC_BASE_URL: ${ARENA_PUBLIC_BASE_URL}
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     healthcheck:
-      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1))"]
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:8787/readyz').then(r=>process.exit(r.ok?0:1))"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -52,6 +52,9 @@ services:
     ports:
       - '80:80'
       - '443:443'
+    environment:
+      ARENA_DOMAIN: ${ARENA_DOMAIN}
+      CADDY_EMAIL: ${CADDY_EMAIL}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./data/caddy:/data

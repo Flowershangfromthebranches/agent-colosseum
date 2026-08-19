@@ -1,101 +1,138 @@
-import { MAX_HANDS, STARTING_STACK } from '@agent-colosseum/protocol'
-import { dealFromDeck } from '@agent-colosseum/crypto'
+import {
+  MAX_HANDS,
+  SCHEMA_VERSION,
+  STARTING_STACK,
+  pokerMatchStateSchema,
+  type PokerActionKind,
+  type PokerMatchStateV1,
+  type SeatId,
+} from '@agent-colosseum/protocol'
 import { blindsForHand } from './blinds.ts'
 import { assertUniqueCards, compareHoles } from './evaluate.ts'
-import type {
-  AppliedAction,
-  HandResult,
-  LegalAction,
-  MatchConfig,
-  MatchTerminal,
-  PlayerState,
-  PublicMatchSnapshot,
-  Seat,
-  Street,
-} from './types.ts'
+import type { LegalAction, PublicMatchSnapshot } from './types.ts'
 
-const OTHER: Record<Seat, Seat> = { button: 'bb', bb: 'button' }
+export const OTHER: Record<SeatId, SeatId> = { A: 'B', B: 'A' }
+
+export function leftOfButton(button: SeatId): SeatId {
+  return OTHER[button]
+}
 
 export class PokerEngine {
-  readonly matchId: string
-  readonly buttonDeviceId: string
-  readonly bbDeviceId: string
-  private readonly startingStack: number
-  handNo = 0
-  actionSeq = 0
-  street: Street = 'complete'
-  players: Record<Seat, PlayerState>
-  board: string[] = []
-  holes: Record<Seat, [string, string] | null> = { button: null, bb: null }
-  currentBet = 0
-  lastRaiseSize = 0
-  toAct: Seat | null = null
-  pot = 0
-  lastActions: AppliedAction[] = []
-  terminal: MatchTerminal | null = null
-  private streetOpener: Seat = 'bb'
-  private actedThisStreet = new Set<Seat>()
-  private pendingUncalled: { seat: Seat; amount: number } | null = null
+  state: PokerMatchStateV1
 
-  constructor(config: MatchConfig) {
-    this.matchId = config.matchId
-    this.buttonDeviceId = config.buttonDeviceId
-    this.bbDeviceId = config.bbDeviceId
-    this.startingStack = config.startingStack ?? STARTING_STACK
-    this.players = {
-      button: emptyPlayer('button', config.buttonDeviceId, this.startingStack),
-      bb: emptyPlayer('bb', config.bbDeviceId, this.startingStack),
+  constructor(state: PokerMatchStateV1) {
+    this.state = pokerMatchStateSchema.parse(state)
+  }
+
+  static create(input: {
+    matchId: string
+    deviceA: string
+    deviceB: string
+    deck: readonly string[]
+    firstButton?: SeatId
+  }): PokerEngine {
+    if (new Set(input.deck).size !== 52 || input.deck.length !== 52) {
+      throw new Error('deck must be a unique 52-card permutation')
     }
+    return new PokerEngine({
+      schemaVersion: SCHEMA_VERSION,
+      matchId: input.matchId,
+      players: {
+        A: { deviceId: input.deviceA, stack: STARTING_STACK },
+        B: { deviceId: input.deviceB, stack: STARTING_STACK },
+      },
+      button: input.firstButton ?? 'A',
+      handNo: 0,
+      street: 'complete',
+      actionSeq: 0,
+      deck: [...input.deck],
+      deckCursor: 0,
+      holes: { A: null, B: null },
+      board: [],
+      streetCommitted: { A: 0, B: 0 },
+      handCommitted: { A: 0, B: 0 },
+      folded: { A: false, B: false },
+      allIn: { A: false, B: false },
+      currentBet: 0,
+      lastRaiseSize: 0,
+      toAct: null,
+      pot: 0,
+      actedThisStreet: [],
+      lastActions: [],
+      terminal: null,
+      startingStack: STARTING_STACK,
+    })
+  }
+
+  static fromState(state: unknown): PokerEngine {
+    return new PokerEngine(pokerMatchStateSchema.parse(state))
+  }
+
+  toState(): PokerMatchStateV1 {
+    return pokerMatchStateSchema.parse(this.state)
   }
 
   totalChips(): number {
-    return this.players.button.stack + this.players.bb.stack
-      + this.players.button.handCommitted + this.players.bb.handCommitted
+    const s = this.state
+    return s.players.A.stack + s.players.B.stack + s.handCommitted.A + s.handCommitted.B
+  }
+
+  seatOf(deviceId: string): SeatId {
+    if (this.state.players.A.deviceId === deviceId) return 'A'
+    if (this.state.players.B.deviceId === deviceId) return 'B'
+    throw new Error('unknown device')
   }
 
   startHand(deck: readonly string[]): void {
     this.assertLive()
-    if (this.street !== 'complete') throw new Error('hand already in progress')
-    this.handNo += 1
-    const dealt = dealFromDeck(deck)
-    assertUniqueCards([...dealt.buttonHole, ...dealt.bbHole, ...dealt.board])
-    this.board = [...dealt.board]
-    this.holes = { button: dealt.buttonHole, bb: dealt.bbHole }
-    this.actionSeq = 0
-    this.lastActions = []
-    this.pendingUncalled = null
-    this.street = 'preflop'
-    this.actedThisStreet = new Set()
-    for (const seat of ['button', 'bb'] as const) {
-      this.players[seat].streetCommitted = 0
-      this.players[seat].handCommitted = 0
-      this.players[seat].folded = false
-      this.players[seat].allIn = this.players[seat].stack === 0
+    if (this.state.street !== 'complete') throw new Error('hand already in progress')
+    if (new Set(deck).size !== 52 || deck.length !== 52) throw new Error('deck must be unique 52')
+    const button = this.state.handNo === 0 ? this.state.button : OTHER[this.state.button]
+    this.state.button = button
+    this.state.handNo += 1
+    this.state.deck = [...deck]
+    this.state.deckCursor = 0
+    this.state.lastActions = []
+    this.state.actedThisStreet = []
+    this.state.street = 'preflop'
+    this.state.actionSeq = 0
+    this.state.folded = { A: false, B: false }
+    this.state.streetCommitted = { A: 0, B: 0 }
+    this.state.handCommitted = { A: 0, B: 0 }
+    this.state.board = []
+    for (const seat of ['A', 'B'] as const) {
+      this.state.allIn[seat] = this.state.players[seat].stack === 0
     }
-    const blinds = blindsForHand(this.handNo)
-    this.postBlind('button', blinds.small)
-    this.postBlind('bb', blinds.big)
-    this.currentBet = Math.max(this.players.button.streetCommitted, this.players.bb.streetCommitted)
-    this.lastRaiseSize = blinds.big
-    this.streetOpener = 'button'
-    this.toAct = this.players.button.allIn && this.players.bb.allIn ? null : 'button'
+    const bb = OTHER[button]
+    const first = this.deal()
+    const second = this.deal()
+    const third = this.deal()
+    const fourth = this.deal()
+    this.state.holes[button] = [first, third]
+    this.state.holes[bb] = [second, fourth]
+    assertUniqueCards([...this.state.holes.A!, ...this.state.holes.B!])
+    const blinds = blindsForHand(this.state.handNo)
+    this.postBlind(button, blinds.small)
+    this.postBlind(bb, blinds.big)
+    this.state.currentBet = Math.max(this.state.streetCommitted.A, this.state.streetCommitted.B)
+    this.state.lastRaiseSize = blinds.big
+    this.state.toAct = this.state.allIn[button] && this.state.allIn[bb] ? null : button
     this.recomputePot()
-    if (this.players.button.allIn && this.players.bb.allIn) this.runOut()
+    if (this.state.allIn.A && this.state.allIn.B) this.runOut()
   }
 
   legalActions(): LegalAction[] {
-    if (this.terminal || this.toAct === null || this.street === 'complete' || this.street === 'showdown') {
-      return []
-    }
-    const actor = this.players[this.toAct]
-    const toCall = this.currentBet - actor.streetCommitted
+    const s = this.state
+    if (s.terminal || s.toAct === null || s.street === 'complete' || s.street === 'showdown') return []
+    const actor = s.toAct
+    const toCall = s.currentBet - s.streetCommitted[actor]
     const actions: LegalAction[] = [{ action: 'fold' }]
     if (toCall <= 0) actions.push({ action: 'check' })
-    if (toCall > 0 && actor.stack > 0) actions.push({ action: 'call' })
-    const opponent = this.players[OTHER[this.toAct]]
-    const minRaiseTo = this.currentBet + this.lastRaiseSize
-    const maxRaiseTo = actor.streetCommitted + actor.stack
-    if (!opponent.allIn && actor.stack > toCall && maxRaiseTo > this.currentBet) {
+    if (toCall > 0 && s.players[actor].stack > 0) actions.push({ action: 'call' })
+    const opponent = OTHER[actor]
+    const minRaiseTo = s.currentBet + s.lastRaiseSize
+    const maxRaiseTo = s.streetCommitted[actor] + s.players[actor].stack
+    if (!s.allIn[opponent] && s.players[actor].stack > toCall && maxRaiseTo > s.currentBet) {
       actions.push({
         action: 'raise',
         minRaiseTo: Math.min(minRaiseTo, maxRaiseTo),
@@ -105,41 +142,38 @@ export class PokerEngine {
     return actions
   }
 
-  apply(seat: Seat, action: AppliedAction['action'], raiseTo?: number, publicRationale = '', fault?: AppliedAction['fault']): void {
+  apply(seat: SeatId, action: PokerActionKind, raiseTo?: number, publicRationale = '', fault?: 'agent_fault' | 'timeout' | 'illegal'): void {
     this.assertLive()
-    if (this.toAct !== seat) throw new Error('not this seat to act')
+    if (this.state.toAct !== seat) throw new Error('not this seat to act')
     const legal = this.legalActions()
-    const actor = this.players[seat]
     const allowed = legal.find((item) => item.action === action)
     if (!allowed) throw new Error(`illegal action ${action}`)
-
+    const s = this.state
     if (action === 'fold') {
-      actor.folded = true
+      s.folded[seat] = true
     } else if (action === 'check') {
-      if (this.currentBet !== actor.streetCommitted) throw new Error('cannot check')
+      if (s.currentBet !== s.streetCommitted[seat]) throw new Error('cannot check')
     } else if (action === 'call') {
-      const toCall = Math.min(this.currentBet - actor.streetCommitted, actor.stack)
+      const toCall = Math.min(s.currentBet - s.streetCommitted[seat], s.players[seat].stack)
       this.commit(seat, toCall)
     } else {
-      const target = raiseTo
-      if (target === undefined) throw new Error('raise requires raiseTo')
-      const minRaiseTo = allowed.minRaiseTo ?? target
-      const maxRaiseTo = allowed.maxRaiseTo ?? target
-      if (target > maxRaiseTo) throw new Error('raise exceeds stack')
-      const isAllIn = target === maxRaiseTo
-      if (target < minRaiseTo && !isAllIn) throw new Error('below minimum raise')
-      const increment = target - this.currentBet
-      this.commit(seat, target - actor.streetCommitted)
-      if (increment >= this.lastRaiseSize) {
-        this.lastRaiseSize = increment
-        this.actedThisStreet = new Set([seat])
+      if (raiseTo === undefined) throw new Error('raise requires raiseTo')
+      const minRaiseTo = allowed.minRaiseTo ?? raiseTo
+      const maxRaiseTo = allowed.maxRaiseTo ?? raiseTo
+      if (raiseTo > maxRaiseTo) throw new Error('raise exceeds stack')
+      const isAllIn = raiseTo === maxRaiseTo
+      if (raiseTo < minRaiseTo && !isAllIn) throw new Error('below minimum raise')
+      const increment = raiseTo - s.currentBet
+      this.commit(seat, raiseTo - s.streetCommitted[seat])
+      if (increment >= s.lastRaiseSize) {
+        s.lastRaiseSize = increment
+        s.actedThisStreet = [seat]
       }
-      this.currentBet = Math.max(this.currentBet, actor.streetCommitted)
+      s.currentBet = Math.max(s.currentBet, s.streetCommitted[seat])
     }
-
-    this.actedThisStreet.add(seat)
-    this.actionSeq += 1
-    this.lastActions.push({
+    if (!s.actedThisStreet.includes(seat)) s.actedThisStreet.push(seat)
+    s.actionSeq += 1
+    s.lastActions.push({
       seat,
       action,
       publicRationale,
@@ -150,113 +184,106 @@ export class PokerEngine {
     this.advanceAfterAction()
   }
 
-  autoFault(seat: Seat): AppliedAction {
-    const legal = this.legalActions()
-    const canCheck = legal.some((item) => item.action === 'check')
-    const action = canCheck ? 'check' : 'fold'
-    this.apply(seat, action, undefined, '', 'agent_fault')
-    return this.lastActions.at(-1)!
+  autoFault(seat: SeatId): PokerMatchStateV1['lastActions'][number] {
+    const canCheck = this.legalActions().some((item) => item.action === 'check')
+    this.apply(seat, canCheck ? 'check' : 'fold', undefined, '', 'agent_fault')
+    return this.state.lastActions.at(-1)!
   }
 
-  snapshot(viewer?: Seat): PublicMatchSnapshot {
-    const blinds = this.handNo === 0 ? blindsForHand(1) : blindsForHand(this.handNo)
+  snapshot(viewer?: SeatId): PublicMatchSnapshot {
+    const s = this.state
     const holes: PublicMatchSnapshot['holes'] = {}
-    if (this.street === 'showdown' || this.street === 'complete') {
-      if (this.holes.button) holes.button = this.holes.button
-      if (this.holes.bb) holes.bb = this.holes.bb
-    } else if (viewer && this.holes[viewer]) {
-      holes[viewer] = this.holes[viewer]!
+    const revealed = s.street === 'showdown' || s.street === 'complete'
+    if (revealed) {
+      if (s.holes.A) holes.A = s.holes.A
+      if (s.holes.B) holes.B = s.holes.B
+    } else if (viewer && s.holes[viewer]) {
+      holes[viewer] = s.holes[viewer]!
     }
-    const boardCards = boardForStreet(this.street, this.board)
     return {
-      matchId: this.matchId,
-      handNo: this.handNo,
-      actionSeq: this.actionSeq,
-      street: this.street,
-      buttonDeviceId: this.buttonDeviceId,
-      bbDeviceId: this.bbDeviceId,
-      stacks: { button: this.players.button.stack, bb: this.players.bb.stack },
-      streetCommitted: {
-        button: this.players.button.streetCommitted,
-        bb: this.players.bb.streetCommitted,
+      matchId: s.matchId,
+      handNo: s.handNo,
+      actionSeq: s.actionSeq,
+      street: s.street,
+      button: s.button,
+      seats: {
+        A: { deviceId: s.players.A.deviceId, stack: s.players.A.stack, streetCommitted: s.streetCommitted.A },
+        B: { deviceId: s.players.B.deviceId, stack: s.players.B.stack, streetCommitted: s.streetCommitted.B },
       },
-      pot: this.pot,
-      currentBet: this.currentBet,
-      toAct: this.toAct,
-      legal: viewer === undefined || viewer === this.toAct ? this.legalActions() : [],
-      board: boardCards,
+      pot: s.pot,
+      currentBet: s.currentBet,
+      toAct: s.toAct,
+      legal: viewer === undefined || viewer === s.toAct ? this.legalActions() : [],
+      board: boardForStreet(s.street, s.board),
       holes,
-      blinds,
-      lastActions: [...this.lastActions],
-      terminal: this.terminal,
+      blinds: s.handNo === 0 ? blindsForHand(1) : blindsForHand(s.handNo),
+      lastActions: [...s.lastActions],
+      terminal: s.terminal,
     }
   }
 
-  forfeit(loserSeat: Seat, reason: MatchTerminal['reason'] = 'forfeit'): MatchTerminal {
+  forfeit(loser: SeatId, reason = 'forfeit'): PokerMatchStateV1['terminal'] {
     this.assertLive()
-    const winner = OTHER[loserSeat]
+    const winner = OTHER[loser]
     this.awardRemainingTo(winner)
-    return this.close(reason, this.players[winner].deviceId)
+    return this.close(reason, this.state.players[winner].deviceId)
   }
 
-  doubleDisconnect(): MatchTerminal {
+  doubleDisconnect(): PokerMatchStateV1['terminal'] {
     this.assertLive()
-    this.returnStreetToStacks()
+    this.returnCommittedToStacks()
     return this.close('double_disconnect', null)
   }
 
-  serverFault(): MatchTerminal {
+  serverFault(): PokerMatchStateV1['terminal'] {
     this.assertLive()
-    this.returnStreetToStacks()
+    this.returnCommittedToStacks()
     return this.close('server_fault', null)
   }
 
-  maybeFinishMatch(): MatchTerminal | null {
-    if (this.terminal) return this.terminal
-    if (this.street !== 'complete') return null
-    const busted = (['button', 'bb'] as const).find((seat) => this.players[seat].stack <= 0)
-    if (busted) {
-      return this.close('bust', this.players[OTHER[busted]].deviceId)
-    }
-    if (this.handNo >= MAX_HANDS) {
-      if (this.players.button.stack === this.players.bb.stack) return null
-      const winner = this.players.button.stack > this.players.bb.stack ? 'button' : 'bb'
-      return this.close('chip_lead', this.players[winner].deviceId)
+  maybeFinishMatch(): PokerMatchStateV1['terminal'] {
+    if (this.state.terminal) return this.state.terminal
+    if (this.state.street !== 'complete') return null
+    const busted = (['A', 'B'] as const).find((seat) => this.state.players[seat].stack <= 0)
+    if (busted) return this.close('bust', this.state.players[OTHER[busted]].deviceId)
+    if (this.state.handNo >= MAX_HANDS) {
+      if (this.state.players.A.stack === this.state.players.B.stack) return null
+      const winner = this.state.players.A.stack > this.state.players.B.stack ? 'A' : 'B'
+      return this.close('chip_lead', this.state.players[winner].deviceId)
     }
     return null
   }
 
-  seatOf(deviceId: string): Seat {
-    if (deviceId === this.buttonDeviceId) return 'button'
-    if (deviceId === this.bbDeviceId) return 'bb'
-    throw new Error('unknown device')
+  private deal(): string {
+    const card = this.state.deck[this.state.deckCursor]
+    if (!card) throw new Error('deck underflow')
+    this.state.deckCursor += 1
+    return card
   }
 
-  deviceOf(seat: Seat): string {
-    return this.players[seat].deviceId
+  private burn(): void {
+    this.deal()
   }
 
-  private postBlind(seat: Seat, amount: number): void {
-    const posted = Math.min(amount, this.players[seat].stack)
-    this.commit(seat, posted)
+  private postBlind(seat: SeatId, amount: number): void {
+    this.commit(seat, Math.min(amount, this.state.players[seat].stack))
   }
 
-  private commit(seat: Seat, amount: number): void {
+  private commit(seat: SeatId, amount: number): void {
     if (amount < 0) throw new Error('negative commit')
-    const player = this.players[seat]
-    if (amount > player.stack) throw new Error('commit exceeds stack')
-    player.stack -= amount
-    player.streetCommitted += amount
-    player.handCommitted += amount
-    if (player.stack === 0) player.allIn = true
+    if (amount > this.state.players[seat].stack) throw new Error('commit exceeds stack')
+    this.state.players[seat].stack -= amount
+    this.state.streetCommitted[seat] += amount
+    this.state.handCommitted[seat] += amount
+    if (this.state.players[seat].stack === 0) this.state.allIn[seat] = true
   }
 
   private recomputePot(): void {
-    this.pot = this.players.button.handCommitted + this.players.bb.handCommitted
+    this.state.pot = this.state.handCommitted.A + this.state.handCommitted.B
   }
 
   private advanceAfterAction(): void {
-    if (this.players.button.folded || this.players.bb.folded) {
+    if (this.state.folded.A || this.state.folded.B) {
       this.finishHandByFold()
       return
     }
@@ -264,197 +291,159 @@ export class PokerEngine {
       this.nextStreet()
       return
     }
-    const next = OTHER[this.toAct!]
-    if (this.players[next].allIn || this.players[next].folded) {
-      if (this.streetClosed()) this.nextStreet()
-      else this.toAct = this.toAct
-      return
-    }
-    this.toAct = next
+    this.state.toAct = OTHER[this.state.toAct!]
   }
 
   private streetClosed(): boolean {
-    const live = (['button', 'bb'] as const).filter((seat) => !this.players[seat].folded)
+    const live = (['A', 'B'] as const).filter((seat) => !this.state.folded[seat])
     if (live.length < 2) return true
-    if (live.every((seat) => this.players[seat].allIn || this.players[seat].streetCommitted === this.currentBet)
-      && live.every((seat) => this.actedThisStreet.has(seat) || this.players[seat].allIn)) {
-      return true
-    }
-    // Preflop: BB option if no raise. Button already acted, BB matched blinds.
-    return false
+    return live.every((seat) =>
+      (this.state.allIn[seat] || this.state.streetCommitted[seat] === this.state.currentBet)
+      && (this.state.actedThisStreet.includes(seat) || this.state.allIn[seat]),
+    )
   }
 
   private nextStreet(): void {
     this.returnUncalledBet()
-    for (const seat of ['button', 'bb'] as const) {
-      this.players[seat].streetCommitted = 0
-    }
-    this.currentBet = 0
-    this.lastRaiseSize = blindsForHand(this.handNo).big
-    this.actedThisStreet = new Set()
-    const bothAllIn = this.players.button.allIn || this.players.bb.allIn
-    if (this.street === 'preflop') this.street = 'flop'
-    else if (this.street === 'flop') this.street = 'turn'
-    else if (this.street === 'turn') this.street = 'river'
-    else {
+    this.state.streetCommitted = { A: 0, B: 0 }
+    this.state.currentBet = 0
+    this.state.lastRaiseSize = blindsForHand(this.state.handNo).big
+    this.state.actedThisStreet = []
+    const bothAllIn = this.state.allIn.A || this.state.allIn.B
+    if (this.state.street === 'preflop') {
+      this.burn()
+      this.state.board = [this.deal(), this.deal(), this.deal()]
+      this.state.street = 'flop'
+    } else if (this.state.street === 'flop') {
+      this.burn()
+      this.state.board.push(this.deal())
+      this.state.street = 'turn'
+    } else if (this.state.street === 'turn') {
+      this.burn()
+      this.state.board.push(this.deal())
+      this.state.street = 'river'
+    } else {
       this.showdown()
       return
     }
+    assertUniqueCards([...this.state.holes.A ?? [], ...this.state.holes.B ?? [], ...this.state.board])
     if (bothAllIn) {
       this.runOut()
       return
     }
-    this.toAct = 'bb'
-    this.streetOpener = 'bb'
-    if (this.players.bb.allIn || this.players.bb.folded) this.toAct = 'button'
-    if (this.players.button.allIn && this.players.bb.allIn) this.runOut()
+    const first = OTHER[this.state.button]
+    this.state.toAct = this.state.allIn[first] ? this.state.button : first
+    if (this.state.allIn.A && this.state.allIn.B) this.runOut()
   }
 
   private runOut(): void {
     this.returnUncalledBet()
-    this.street = 'showdown'
-    this.toAct = null
+    while (this.state.board.length < 5) {
+      this.burn()
+      if (this.state.board.length === 0) {
+        this.state.board.push(this.deal(), this.deal(), this.deal())
+      } else {
+        this.state.board.push(this.deal())
+      }
+    }
+    this.state.street = 'showdown'
+    this.state.toAct = null
     this.showdown()
   }
 
   private finishHandByFold(): void {
     this.returnUncalledBet()
-    const winner = this.players.button.folded ? 'bb' : 'button'
-    this.players[winner].stack += this.pot
-    this.players.button.handCommitted = 0
-    this.players.bb.handCommitted = 0
-    this.pot = 0
-    this.street = 'complete'
-    this.toAct = null
+    const winner = this.state.folded.A ? 'B' : 'A'
+    this.state.players[winner].stack += this.state.pot
+    this.state.handCommitted = { A: 0, B: 0 }
+    this.state.pot = 0
+    this.state.street = 'complete'
+    this.state.toAct = null
     this.assertConservation()
     this.maybeFinishMatch()
   }
 
   private showdown(): void {
     this.returnUncalledBet()
-    const result = this.awardShowdown()
-    void result
-    this.street = 'complete'
-    this.toAct = null
+    const winners = compareHoles(this.state.holes.A!, this.state.holes.B!, this.state.board)
+    const pot = this.state.pot
+    if (winners.length === 2) {
+      const share = Math.floor(pot / 2)
+      const odd = pot - share * 2
+      this.state.players.A.stack += share
+      this.state.players.B.stack += share
+      if (odd) this.state.players[leftOfButton(this.state.button)].stack += odd
+    } else {
+      this.state.players[winners[0]!].stack += pot
+    }
+    this.state.handCommitted = { A: 0, B: 0 }
+    this.state.pot = 0
+    this.state.street = 'complete'
+    this.state.toAct = null
     this.assertConservation()
     this.maybeFinishMatch()
   }
 
-  private awardShowdown(): HandResult {
-    const winners = compareHoles(this.holes.button!, this.holes.bb!, this.board)
-    const pot = this.pot
-    if (winners.length === 2) {
-      const share = Math.floor(pot / 2)
-      const odd = pot - share * 2
-      this.players.button.stack += share
-      this.players.bb.stack += share
-      // odd chip to the button (SB) — standard leftover to first seat after dealer
-      if (odd) this.players.button.stack += odd
-      this.players.button.handCommitted = 0
-      this.players.bb.handCommitted = 0
-      this.pot = 0
-      return {
-        winners,
-        pot,
-        oddChipTo: odd ? 'button' : null,
-        returnedUncalled: this.pendingUncalled,
-        shown: { button: this.holes.button!, bb: this.holes.bb! },
-      }
-    }
-    const winner = winners[0]!
-    this.players[winner].stack += pot
-    this.players.button.handCommitted = 0
-    this.players.bb.handCommitted = 0
-    this.pot = 0
-    return {
-      winners,
-      pot,
-      oddChipTo: null,
-      returnedUncalled: this.pendingUncalled,
-      shown: { button: this.holes.button!, bb: this.holes.bb! },
-    }
-  }
-
   private returnUncalledBet(): void {
-    const a = this.players.button.streetCommitted
-    const b = this.players.bb.streetCommitted
-    if (a === b) {
-      this.pendingUncalled = null
-      return
-    }
-    const high = a > b ? 'button' : 'bb'
-    const low = OTHER[high]
-    const extra = this.players[high].streetCommitted - this.players[low].streetCommitted
-    if (extra <= 0) return
-    this.players[high].streetCommitted -= extra
-    this.players[high].handCommitted -= extra
-    this.players[high].stack += extra
-    this.pendingUncalled = { seat: high, amount: extra }
+    const a = this.state.streetCommitted.A
+    const b = this.state.streetCommitted.B
+    if (a === b) return
+    const high: SeatId = a > b ? 'A' : 'B'
+    const extra = this.state.streetCommitted[high] - this.state.streetCommitted[OTHER[high]]
+    this.state.streetCommitted[high] -= extra
+    this.state.handCommitted[high] -= extra
+    this.state.players[high].stack += extra
     this.recomputePot()
   }
 
-  private returnStreetToStacks(): void {
-    for (const seat of ['button', 'bb'] as const) {
-      const player = this.players[seat]
-      player.stack += player.handCommitted
-      player.handCommitted = 0
-      player.streetCommitted = 0
+  private returnCommittedToStacks(): void {
+    for (const seat of ['A', 'B'] as const) {
+      this.state.players[seat].stack += this.state.handCommitted[seat]
+      this.state.handCommitted[seat] = 0
+      this.state.streetCommitted[seat] = 0
     }
-    this.pot = 0
-    this.street = 'complete'
-    this.toAct = null
+    this.state.pot = 0
+    this.state.street = 'complete'
+    this.state.toAct = null
   }
 
-  private awardRemainingTo(winner: Seat): void {
-    this.players[winner].stack += this.players.button.handCommitted + this.players.bb.handCommitted
-    this.players.button.handCommitted = 0
-    this.players.bb.handCommitted = 0
-    this.pot = 0
-    this.street = 'complete'
-    this.toAct = null
+  private awardRemainingTo(winner: SeatId): void {
+    this.state.players[winner].stack += this.state.handCommitted.A + this.state.handCommitted.B
+    this.state.handCommitted = { A: 0, B: 0 }
+    this.state.pot = 0
+    this.state.street = 'complete'
+    this.state.toAct = null
   }
 
-  private close(reason: MatchTerminal['reason'], winnerDeviceId: string | null): MatchTerminal {
-    this.terminal = {
+  private close(reason: string, winnerDeviceId: string | null): PokerMatchStateV1['terminal'] {
+    this.state.terminal = {
       reason,
       winnerDeviceId,
       stacks: {
-        [this.buttonDeviceId]: this.players.button.stack,
-        [this.bbDeviceId]: this.players.bb.stack,
+        [this.state.players.A.deviceId]: this.state.players.A.stack,
+        [this.state.players.B.deviceId]: this.state.players.B.stack,
       },
       grantTransferred: winnerDeviceId !== null && (reason === 'bust' || reason === 'chip_lead' || reason === 'forfeit'),
     }
-    return this.terminal
+    return this.state.terminal
   }
 
   private assertLive(): void {
-    if (this.terminal) throw new Error('match already terminal')
+    if (this.state.terminal) throw new Error('match already terminal')
   }
 
   private assertConservation(): void {
-    const total = this.players.button.stack + this.players.bb.stack
-      + this.players.button.handCommitted + this.players.bb.handCommitted
-    if (total !== this.startingStack * 2) {
-      throw new Error(`chip conservation violated: ${total} != ${this.startingStack * 2}`)
+    if (this.totalChips() !== STARTING_STACK * 2) {
+      throw new Error(`chip conservation violated: ${this.totalChips()}`)
     }
   }
 }
 
-function emptyPlayer(seat: Seat, deviceId: string, stack: number): PlayerState {
-  return {
-    seat,
-    deviceId,
-    stack,
-    streetCommitted: 0,
-    handCommitted: 0,
-    folded: false,
-    allIn: false,
-  }
-}
-
-function boardForStreet(street: Street, board: string[]): string[] {
+function boardForStreet(street: StreetLike, board: string[]): string[] {
   if (street === 'preflop') return []
   if (street === 'flop') return board.slice(0, 3)
   if (street === 'turn') return board.slice(0, 4)
   return [...board]
 }
+
+type StreetLike = PokerMatchStateV1['street']

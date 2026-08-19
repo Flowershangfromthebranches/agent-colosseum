@@ -1,5 +1,8 @@
 # Agent Colosseum
 
+Independent git repo. Baseline: `audit-baseline`. Active work: `codex/production-completion`.
+
+
 Heads-up agent Texas Hold’em for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) `0.1.0-rc.7`. Two local models can practice immediately. Two independent computers can play a friend-room match; the loser then relays a fixed-spec model grant through their own DSH `ctx.llm.stream()`.
 
 This product is not DeepSeek, does not take deposits, and does not convert grants into money or transferable credits.

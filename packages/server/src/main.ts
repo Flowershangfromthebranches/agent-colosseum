@@ -1,21 +1,55 @@
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import pg from 'pg'
+import Redis from 'ioredis'
 import { ArenaService } from './arena.ts'
 import { loadConfig } from './config.ts'
+import { sha256Hex } from './hash.ts'
 import { buildServer } from './http.ts'
-import { migrate } from './migrate.ts'
+import { logJson } from './log.ts'
 import { PostgresStore } from './postgres.ts'
-import pg from 'pg'
+
+const here = dirname(fileURLToPath(import.meta.url))
+
+export async function migrate(pool: pg.Pool): Promise<void> {
+  await pool.query('SELECT pg_advisory_lock(87231001)')
+  try {
+    const sql = readFileSync(join(here, 'schema.sql'), 'utf8')
+    await pool.query(sql)
+  } finally {
+    await pool.query('SELECT pg_advisory_unlock(87231001)')
+  }
+}
 
 async function main(): Promise<void> {
   const config = loadConfig()
-  await migrate(config.databaseUrl)
+  if (!config.databaseUrl || !config.redisUrl || !config.publicBaseUrl) {
+    throw new Error('DATABASE_URL, REDIS_URL and ARENA_PUBLIC_BASE_URL are required')
+  }
   const pool = new pg.Pool({ connectionString: config.databaseUrl })
-  const arena = new ArenaService(new PostgresStore(pool), config)
-  const app = await buildServer(arena, config)
+  const redis = new Redis(config.redisUrl)
+  await migrate(pool)
+  for (const [hash, { uses }] of config.inviteHashes) {
+    await pool.query(
+      `INSERT INTO invites (code_hash, uses_remaining, max_uses) VALUES ($1,$2,$2) ON CONFLICT DO NOTHING`,
+      [hash, uses],
+    )
+  }
+  const store = new PostgresStore(pool)
+  const arena = new ArenaService(store, config)
+  await arena.restoreLive()
+  const app = await buildServer(arena, config, {
+    redisPing: async () => (await redis.ping()) === 'PONG',
+  })
   await app.listen({ host: config.host, port: config.port })
-  console.log(`arena listening on ${config.host}:${config.port}`)
+  logJson('info', 'arena.listen', { port: config.port, inviteSeeded: config.inviteHashes.size })
+  void sha256Hex
 }
 
-main().catch((error) => {
-  console.error(error)
-  process.exit(1)
-})
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main().catch((error) => {
+    logJson('error', 'arena.fatal', { message: error instanceof Error ? error.message : 'fatal' })
+    process.exit(1)
+  })
+}

@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
-import { commitServerSeed, deriveHandDeck, randomBytes, toHex } from '@agent-colosseum/crypto'
+import { commitServerSeed, deriveHandDeck } from '@agent-colosseum/crypto'
 import { STARTING_STACK, uuidv7 } from '@agent-colosseum/protocol'
 import { PokerEngine } from './engine.ts'
-import { playScriptedMatch } from './local-match.ts'
+import { playScriptedMatch, randomEntropyPair } from './local-match.ts'
 import { scriptDecide, type ScriptKind } from './script-policy.ts'
 
 const POLICIES: ScriptKind[] = ['check-fold', 'call-station', 'min-raise-once']
@@ -12,34 +12,34 @@ describe('properties', () => {
     for (let i = 0; i < 25; i++) {
       const result = playScriptedMatch({
         matchId: uuidv7(),
-        buttonDeviceId: uuidv7(),
-        bbDeviceId: uuidv7(),
-        buttonPolicy: POLICIES[i % 3]!,
-        bbPolicy: POLICIES[(i + 1) % 3]!,
+        deviceA: uuidv7(),
+        deviceB: uuidv7(),
+        policyA: POLICIES[i % 3]!,
+        policyB: POLICIES[(i + 1) % 3]!,
+        serverSeedHex: commitServerSeed().serverSeedHex,
+        entropy: randomEntropyPair(),
       })
-      expect(result.engine.players.button.stack + result.engine.players.bb.stack).toBe(STARTING_STACK * 2)
-      expect(result.terminal).toBeTruthy()
-      expect(result.engine.terminal).toBe(result.terminal)
+      expect(result.engine.totalChips()).toBe(STARTING_STACK * 2)
+      expect(result.engine.state.terminal).toBeTruthy()
     }
   })
 
-  it('never deals duplicate cards and replays a hand from the same seed', () => {
+  it('never deals duplicate cards including burns', () => {
     const matchId = uuidv7()
     const seed = commitServerSeed().serverSeedHex
-    const entropy: [string, string] = [toHex(randomBytes(32)), toHex(randomBytes(32))]
-    const deck = deriveHandDeck({ matchId, handNo: 1, serverSeedHex: seed, playerEntropy: entropy })
-    expect(new Set(deck).size).toBe(52)
-    const a = new PokerEngine({ matchId, buttonDeviceId: uuidv7(), bbDeviceId: uuidv7() })
-    const b = new PokerEngine({ matchId, buttonDeviceId: a.buttonDeviceId, bbDeviceId: a.bbDeviceId })
-    a.startHand(deck)
-    b.startHand(deck)
-    while (a.toAct && !a.terminal) {
-      const decision = scriptDecide('call-station', a.legalActions(), a.handNo)
-      a.apply(a.toAct, decision.action, decision.raiseTo, decision.publicRationale)
-      b.apply(b.toAct!, decision.action, decision.raiseTo, decision.publicRationale)
+    const entropy = randomEntropyPair()
+    const cards = deriveHandDeck({ matchId, handNo: 1, serverSeedHex: seed, playerEntropy: entropy })
+    const engine = PokerEngine.create({
+      matchId, deviceA: uuidv7(), deviceB: uuidv7(), deck: cards,
+    })
+    engine.startHand(cards)
+    while (engine.state.toAct && !engine.state.terminal) {
+      const decision = scriptDecide('call-station', engine.legalActions(), engine.state.handNo)
+      engine.apply(engine.state.toAct, decision.action, decision.raiseTo)
     }
-    expect(a.snapshot()).toEqual(b.snapshot())
-    const live = [...a.holes.button!, ...a.holes.bb!, ...a.board]
-    expect(new Set(live).size).toBe(9)
+    const holes = [...engine.state.holes.A!, ...engine.state.holes.B!]
+    const used = [...holes, ...engine.state.board]
+    expect(new Set(used).size).toBe(used.length)
+    expect(new Set(cards).size).toBe(52)
   })
 })

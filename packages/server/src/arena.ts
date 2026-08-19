@@ -5,49 +5,60 @@ import {
   nextEventHash,
   randomBytes,
   toHex,
-  verifyChallenge,
+  verifyEntropy,
+  verifyIdentity,
+  verifyStake,
 } from '@agent-colosseum/crypto'
 import { PokerEngine } from '@agent-colosseum/poker'
 import {
   DISCONNECT_FORFEIT_MS,
-  defaultStakeSpec,
+  newDeviceId,
   newMatchId,
+  newMessageId,
   newRoomCode,
   newRoomId,
   newStakeId,
-  stakeFingerprint,
-  type PokerAction,
-  type StakeSpec,
+  PROTOCOL_VERSION,
+  stakeTermsFingerprint,
+  type KnownClientFrame,
+  type PokerActionV1,
+  type StakeSpecV1,
 } from '@agent-colosseum/protocol'
 import { isProviderAllowed, type ServerConfig } from './config.ts'
-import { PresenceBook } from './presence.ts'
+import { sha256Hex } from './hash.ts'
+import { MemoryPresence, type PresenceBook } from './presence.ts'
 import { RelayController } from './relay.ts'
 import { settleMatch, tickGrantOnline } from './settlement.ts'
 import type { ArenaStore, DeviceRecord, MatchRecord, RoomRecord } from './store.ts'
 
+export type Outbound = { type: string; payload: unknown }
+
 export class ArenaService {
-  readonly presence = new PresenceBook()
+  readonly presence: PresenceBook
   readonly relay: RelayController
+  readonly sockets = new Map<string, Set<(frame: Outbound) => void>>()
+  readonly seen = new Map<string, Set<string>>()
   readonly engines = new Map<string, PokerEngine>()
-  readonly sessions = new Map<string, { deviceId: string; expiresAt: number }>()
-  readonly challenges = new Map<string, { nonce: string; expiresAt: number; ed25519PublicKey: string; x25519PublicKey: string }>()
+  readonly challenges = new Map<string, { nonce: string; expiresAt: number; ed25519: string; x25519: string; inviteCode?: string }>()
   private eventHash = new Map<string, string>()
 
   constructor(
     readonly store: ArenaStore,
     readonly config: ServerConfig,
+    presence?: PresenceBook,
   ) {
+    this.presence = presence ?? new MemoryPresence()
     this.relay = new RelayController(store)
   }
 
-  issueChallenge(ed25519PublicKey: string, x25519PublicKey: string): { nonce: string; expiresAt: number } {
+  issueChallenge(ed25519: string, x25519: string, inviteCode?: string) {
     const nonce = toHex(randomBytes(24))
     const expiresAt = Date.now() + 30_000
-    this.challenges.set(nonce, { nonce, expiresAt, ed25519PublicKey, x25519PublicKey })
+    this.challenges.set(nonce, { nonce, expiresAt, ed25519, x25519, ...inviteCode ? { inviteCode } : {} })
     return { nonce, expiresAt }
   }
 
-  async redeemChallenge(input: {
+  async redeem(input: {
     nonce: string
     signature: string
     inviteCode?: string
@@ -56,42 +67,110 @@ export class ArenaService {
     const challenge = this.challenges.get(input.nonce)
     this.challenges.delete(input.nonce)
     if (!challenge || challenge.expiresAt < Date.now()) throw new Error('challenge expired')
-    if (!verifyChallenge(challenge.ed25519PublicKey, input.nonce, input.signature)) {
-      throw new Error('bad signature')
-    }
-    const existing = await this.store.findDeviceByPubkey(challenge.ed25519PublicKey)
+    const existing = await this.store.findDeviceByEd25519(challenge.ed25519)
     if (existing) {
+      if (existing.x25519PublicKey !== challenge.x25519) throw new Error('IDENTITY_CONFLICT')
+      if (input.deviceId && input.deviceId !== existing.deviceId) throw new Error('IDENTITY_CONFLICT')
+      if (!verifyIdentity(challenge.ed25519, existing.deviceId, input.nonce, input.signature)) {
+        throw new Error('UNAUTHORIZED')
+      }
       await this.store.touchDevice(existing.deviceId, Date.now())
       return existing
     }
-    if (!input.inviteCode || !this.config.inviteCodes.includes(input.inviteCode)) {
-      throw new Error('invite required')
-    }
-    if (!input.deviceId) throw new Error('deviceId required on first register')
+    const inviteCode = input.inviteCode ?? challenge.inviteCode
+    if (!inviteCode) throw new Error('INVITE_INVALID')
+    if (await this.store.findDeviceByX25519(challenge.x25519)) throw new Error('IDENTITY_CONFLICT')
+    const consumed = await this.store.consumeInvite(sha256Hex(inviteCode))
+    if (!consumed) throw new Error('INVITE_EXHAUSTED')
     const device: DeviceRecord = {
-      deviceId: input.deviceId,
-      ed25519PublicKey: challenge.ed25519PublicKey,
-      x25519PublicKey: challenge.x25519PublicKey,
+      deviceId: newDeviceId(),
+      ed25519PublicKey: challenge.ed25519,
+      x25519PublicKey: challenge.x25519,
       createdAt: Date.now(),
       lastSeenAt: Date.now(),
+    }
+    if (!verifyIdentity(challenge.ed25519, device.deviceId, input.nonce, input.signature)
+      && !verifyIdentity(challenge.ed25519, 'pending', input.nonce, input.signature)) {
+      // first-time clients sign the nonce only; bind after assignment
+      const { verifyUtf8 } = await import('@agent-colosseum/crypto')
+      if (!verifyUtf8(challenge.ed25519, input.nonce, input.signature)) throw new Error('UNAUTHORIZED')
     }
     await this.store.putDevice(device)
     return device
   }
 
-  assertStakeAllowed(stake: StakeSpec): void {
-    if (!isProviderAllowed(this.config.providerAllowlist, stake.provider)) {
-      throw new Error(`provider ${stake.provider} is not allowlisted for real grants`)
-    }
-    const expected = defaultStakeSpec(stake.ownerDeviceId, stake.provider, stake.model, stake.signature)
-    if (stakeFingerprint(stake) !== stakeFingerprint(expected)) {
-      throw new Error('unsupported stake spec')
+  attach(deviceId: string, send: (frame: Outbound) => void): () => void {
+    const set = this.sockets.get(deviceId) ?? new Set()
+    set.add(send)
+    this.sockets.set(deviceId, set)
+    this.presence.connect(deviceId)
+    return () => {
+      set.delete(send)
+      if (set.size === 0) this.sockets.delete(deviceId)
+      void this.handleDisconnect(deviceId)
     }
   }
 
-  async createRoom(hostDeviceId: string, stake: StakeSpec): Promise<RoomRecord> {
-    this.assertStakeAllowed(stake)
-    if (stake.ownerDeviceId !== hostDeviceId) throw new Error('stake owner mismatch')
+  send(deviceId: string, type: string, payload: unknown): void {
+    const frame = { type, payload }
+    for (const sink of this.sockets.get(deviceId) ?? []) sink(frame)
+  }
+
+  broadcast(deviceIds: string[], type: string, payload: unknown): void {
+    for (const id of new Set(deviceIds)) this.send(id, type, payload)
+  }
+
+  remember(deviceId: string, messageId: string): void {
+    const set = this.seen.get(deviceId) ?? new Set()
+    if (set.has(messageId)) throw new Error('REPLAY')
+    set.add(messageId)
+    this.seen.set(deviceId, set)
+  }
+
+  async handle(deviceId: string, frame: KnownClientFrame): Promise<void> {
+    this.remember(deviceId, frame.messageId)
+    this.presence.beat(deviceId)
+    switch (frame.type) {
+      case 'session.heartbeat':
+        return
+      case 'room.create': {
+        const room = await this.createRoom(deviceId, frame.payload.stake)
+        this.send(deviceId, 'room.created', room)
+        return
+      }
+      case 'room.join': {
+        const room = await this.joinRoom(deviceId, frame.payload.roomCode, frame.payload.stake)
+        this.broadcast([room.hostDeviceId, room.guestDeviceId!], 'room.updated', room)
+        return
+      }
+      case 'room.accept': {
+        const room = await this.acceptRoom(deviceId, frame.payload.roomId, frame.payload.stake)
+        this.broadcast([room.hostDeviceId, room.guestDeviceId!], 'room.updated', room)
+        return
+      }
+      case 'room.leave':
+        await this.leaveRoom(deviceId, frame.payload.roomId)
+        return
+      case 'match.entropy':
+        await this.submitEntropy(deviceId, frame.payload.matchId, frame.payload.entropyHex, frame.payload.signature)
+        return
+      case 'match.action':
+        await this.submitAction(deviceId, frame.payload)
+        return
+      default:
+        throw new Error('UNHANDLED')
+    }
+  }
+
+  assertStake(deviceId: string, stake: StakeSpecV1, publicKey: string): void {
+    if (!isProviderAllowed(this.config.providerAllowlist, stake.provider)) throw new Error('PROVIDER_DENIED')
+    if (stake.ownerDeviceId !== deviceId) throw new Error('UNAUTHORIZED')
+    if (!verifyStake(publicKey, stake)) throw new Error('STAKE_SIGNATURE')
+  }
+
+  async createRoom(hostDeviceId: string, stake: StakeSpecV1): Promise<RoomRecord> {
+    const device = (await this.store.getDevice(hostDeviceId))!
+    this.assertStake(hostDeviceId, stake, device.ed25519PublicKey)
     const room: RoomRecord = {
       roomId: newRoomId(),
       roomCode: newRoomCode(),
@@ -108,85 +187,107 @@ export class ArenaService {
     return room
   }
 
-  async joinRoom(guestDeviceId: string, roomCode: string, stake: StakeSpec): Promise<RoomRecord> {
-    this.assertStakeAllowed(stake)
-    if (stake.ownerDeviceId !== guestDeviceId) throw new Error('stake owner mismatch')
+  async joinRoom(guestDeviceId: string, roomCode: string, stake: StakeSpecV1): Promise<RoomRecord> {
+    const device = (await this.store.getDevice(guestDeviceId))!
+    this.assertStake(guestDeviceId, stake, device.ed25519PublicKey)
     const room = await this.store.findRoomByCode(roomCode)
     if (!room || room.status !== 'open') throw new Error('room unavailable')
     if (room.hostDeviceId === guestDeviceId) throw new Error('cannot join own room')
-    if (stakeFingerprint(stake) !== stakeFingerprint(room.hostStake)) throw new Error('stake mismatch')
-    return this.store.updateRoom(room.roomId, {
-      guestDeviceId,
-      guestStake: stake,
-    })
+    if (stakeTermsFingerprint(stake) !== stakeTermsFingerprint(room.hostStake)) throw new Error('STAKE_MISMATCH')
+    return this.store.updateRoom(room.roomId, { guestDeviceId, guestStake: stake })
   }
 
-  async acceptRoom(deviceId: string, roomId: string): Promise<RoomRecord> {
+  async acceptRoom(deviceId: string, roomId: string, stake: StakeSpecV1): Promise<RoomRecord> {
     const room = await this.store.getRoom(roomId)
     if (!room || !room.guestDeviceId || !room.guestStake) throw new Error('room not ready')
+    if (stakeTermsFingerprint(stake) !== stakeTermsFingerprint(room.hostStake)) throw new Error('STAKE_MISMATCH')
     const patch: Partial<RoomRecord> = {}
     if (deviceId === room.hostDeviceId) patch.hostAccepted = true
     else if (deviceId === room.guestDeviceId) patch.guestAccepted = true
-    else throw new Error('not in room')
+    else throw new Error('UNAUTHORIZED')
     const next = await this.store.updateRoom(roomId, patch)
-    if (next.hostAccepted && next.guestAccepted && !next.matchId) {
-      await this.startMatch(next)
-      return (await this.store.getRoom(roomId))!
-    }
-    return next
+    if (next.hostAccepted && next.guestAccepted && !next.matchId) await this.openMatch(next)
+    return (await this.store.getRoom(roomId))!
   }
 
   async leaveRoom(deviceId: string, roomId: string): Promise<void> {
     const room = await this.store.getRoom(roomId)
-    if (!room) return
-    if (room.matchId) return
+    if (!room || room.matchId) return
     if (deviceId === room.hostDeviceId || deviceId === room.guestDeviceId) {
       await this.store.updateRoom(roomId, { status: 'closed' })
     }
   }
 
-  async submitAction(deviceId: string, action: PokerAction): Promise<PokerEngine> {
+  async submitEntropy(deviceId: string, matchId: string, entropyHex: string, signature: string): Promise<void> {
+    const match = await this.store.getMatch(matchId)
+    const device = await this.store.getDevice(deviceId)
+    if (!match || !device || match.status !== 'pending_entropy') throw new Error('no pending match')
+    if (!verifyEntropy(device.ed25519PublicKey, matchId, entropyHex, signature)) throw new Error('UNAUTHORIZED')
+    const patch: Partial<MatchRecord> = {}
+    if (deviceId === match.deviceA) patch.entropyA = entropyHex
+    else if (deviceId === match.deviceB) patch.entropyB = entropyHex
+    else throw new Error('UNAUTHORIZED')
+    await this.store.saveMatchState(matchId, patch)
+    const next = (await this.store.getMatch(matchId))!
+    if (next.entropyA && next.entropyB) await this.dealFirst(next)
+  }
+
+  async submitAction(deviceId: string, action: PokerActionV1): Promise<void> {
     const engine = this.engines.get(action.matchId)
     const match = await this.store.getMatch(action.matchId)
     if (!engine || !match || match.status !== 'live') throw new Error('no live match')
-    if (action.handNo !== engine.handNo || action.actionSeq !== engine.actionSeq) {
-      throw new Error('stale action')
-    }
+    if (action.handNo !== engine.state.handNo || action.actionSeq !== engine.state.actionSeq) throw new Error('STALE_ACTION')
     const seat = engine.seatOf(deviceId)
-    const legal = engine.legalActions()
-    if (!legal.some((item) => item.action === action.action)) throw new Error('illegal action')
+    if (!engine.legalActions().some((item) => item.action === action.action)) throw new Error('ILLEGAL_ACTION')
     engine.apply(seat, action.action, action.raiseTo, action.publicRationale)
-    await this.recordEvent(engine.matchId, { type: 'action', action })
-    await this.afterEngine(engine)
-    return engine
+    await this.persistAndPublish(engine)
   }
 
   async timeoutSeat(matchId: string): Promise<void> {
     const engine = this.engines.get(matchId)
-    if (!engine || !engine.toAct) return
-    engine.autoFault(engine.toAct)
-    await this.recordEvent(engine.matchId, { type: 'timeout', seat: engine.toAct })
-    await this.afterEngine(engine)
+    const match = await this.store.getMatch(matchId)
+    if (!engine || !match || match.status !== 'live' || !engine.state.toAct) return
+    engine.autoFault(engine.state.toAct)
+    await this.persistAndPublish(engine)
   }
 
   async handleDisconnect(deviceId: string, now = Date.now()): Promise<void> {
     this.presence.disconnect(deviceId)
     for (const engine of this.engines.values()) {
-      if (engine.terminal) continue
-      const ids = [engine.buttonDeviceId, engine.bbDeviceId]
+      if (engine.state.terminal) continue
+      const ids = [engine.state.players.A.deviceId, engine.state.players.B.deviceId]
       if (!ids.includes(deviceId)) continue
       const other = ids.find((id) => id !== deviceId)!
-      const selfOffline = this.presence.offlineSince(deviceId, now)
-      const otherOffline = this.presence.offlineSince(other, now)
-      if (selfOffline !== null && otherOffline !== null) {
+      const selfOff = this.presence.offlineSince(deviceId, now)
+      const otherOff = this.presence.offlineSince(other, now)
+      if (selfOff !== null && otherOff !== null) {
         engine.doubleDisconnect()
         await this.finish(engine)
-        continue
-      }
-      if (selfOffline !== null && selfOffline > DISCONNECT_FORFEIT_MS) {
+      } else if (selfOff !== null && selfOff > DISCONNECT_FORFEIT_MS) {
         engine.forfeit(engine.seatOf(deviceId))
         await this.finish(engine)
       }
+    }
+  }
+
+  async evaluateDisconnect(matchId: string, now = Date.now()): Promise<void> {
+    const engine = this.engines.get(matchId)
+    if (!engine || engine.state.terminal) return
+    const a = engine.state.players.A.deviceId
+    const b = engine.state.players.B.deviceId
+    const aOff = this.presence.offlineSince(a, now)
+    const bOff = this.presence.offlineSince(b, now)
+    if (aOff !== null && bOff !== null) {
+      engine.doubleDisconnect()
+      await this.finish(engine)
+      return
+    }
+    if (aOff !== null && aOff > DISCONNECT_FORFEIT_MS) {
+      engine.forfeit('A')
+      await this.finish(engine)
+    } else if (bOff !== null && bOff > DISCONNECT_FORFEIT_MS) {
+      engine.forfeit('B')
+      await this.finish(engine)
     }
   }
 
@@ -199,101 +300,144 @@ export class ArenaService {
     return ticked
   }
 
-  private async startMatch(room: RoomRecord): Promise<void> {
+  async restoreLive(): Promise<void> {
+    for (const match of await this.store.listLiveMatches()) {
+      if (match.state) this.engines.set(match.matchId, PokerEngine.fromState(match.state))
+    }
+  }
+
+  private async openMatch(room: RoomRecord): Promise<void> {
     const commit = commitServerSeed()
-    const entropy: [string, string] = [toHex(randomBytes(32)), toHex(randomBytes(32))]
     const matchId = newMatchId()
-    const buttonDeviceId = room.hostDeviceId
-    const bbDeviceId = room.guestDeviceId!
     const record: MatchRecord = {
       matchId,
       roomId: room.roomId,
-      buttonDeviceId,
-      bbDeviceId,
-      serverSeedHex: commit.serverSeedHex,
+      deviceA: room.hostDeviceId,
+      deviceB: room.guestDeviceId!,
       commitment: commit.commitment,
-      playerEntropy: entropy,
-      status: 'live',
+      serverSeedHex: commit.serverSeedHex,
+      entropyA: null,
+      entropyB: null,
+      status: 'pending_entropy',
       winnerDeviceId: null,
       settled: false,
+      state: null,
       createdAt: Date.now(),
     }
     await this.store.putMatch(record)
-    await this.store.putStake({
-      stakeId: newStakeId(),
-      matchId,
-      spec: room.hostStake,
-      status: 'locked',
-    })
-    await this.store.putStake({
-      stakeId: newStakeId(),
-      matchId,
-      spec: room.guestStake!,
-      status: 'locked',
-    })
+    await this.store.putStake({ stakeId: newStakeId(), matchId, spec: room.hostStake, status: 'locked' })
+    await this.store.putStake({ stakeId: newStakeId(), matchId, spec: room.guestStake!, status: 'locked' })
     await this.store.updateRoom(room.roomId, { matchId, status: 'matched' })
-    const engine = new PokerEngine({ matchId, buttonDeviceId, bbDeviceId })
-    this.engines.set(matchId, engine)
     this.eventHash.set(matchId, genesisHash())
-    await this.recordEvent(matchId, {
-      type: 'match.start',
+    await this.recordEvent(matchId, { type: 'match.open', commitment: commit.commitment })
+    this.broadcast([record.deviceA, record.deviceB], 'match.proposal', {
+      matchId,
       commitment: commit.commitment,
-      entropy,
+      hostStake: room.hostStake,
+      guestStake: room.guestStake,
     })
-    await this.dealNext(engine, record)
   }
 
-  private async dealNext(engine: PokerEngine, match: MatchRecord): Promise<void> {
+  private async dealFirst(match: MatchRecord): Promise<void> {
     const deck = deriveHandDeck({
       matchId: match.matchId,
-      handNo: engine.handNo + 1,
+      handNo: 1,
       serverSeedHex: match.serverSeedHex,
-      playerEntropy: match.playerEntropy,
+      playerEntropy: [match.entropyA!, match.entropyB!],
+    })
+    const engine = PokerEngine.create({
+      matchId: match.matchId,
+      deviceA: match.deviceA,
+      deviceB: match.deviceB,
+      deck,
     })
     engine.startHand(deck)
-    await this.recordEvent(match.matchId, { type: 'hand.start', handNo: engine.handNo })
-    await this.afterEngine(engine)
+    this.engines.set(match.matchId, engine)
+    await this.store.saveMatchState(match.matchId, { status: 'live', state: engine.toState() })
+    await this.publishSnapshots(engine)
   }
 
-  private async afterEngine(engine: PokerEngine): Promise<void> {
-    if (engine.street === 'complete' && !engine.terminal) {
+  private async persistAndPublish(engine: PokerEngine): Promise<void> {
+    if (engine.state.street === 'complete' && !engine.state.terminal) {
       const terminal = engine.maybeFinishMatch()
       if (!terminal) {
-        const match = (await this.store.getMatch(engine.matchId))!
-        await this.dealNext(engine, match)
-        return
+        const match = (await this.store.getMatch(engine.state.matchId))!
+        const deck = deriveHandDeck({
+          matchId: match.matchId,
+          handNo: engine.state.handNo + 1,
+          serverSeedHex: match.serverSeedHex,
+          playerEntropy: [match.entropyA!, match.entropyB!],
+        })
+        engine.startHand(deck)
       }
     }
-    if (engine.terminal) await this.finish(engine)
+    await this.store.saveMatchState(engine.state.matchId, {
+      state: engine.toState(),
+      status: engine.state.terminal ? 'terminal' : 'live',
+    })
+    await this.recordEvent(engine.state.matchId, { type: 'state', actionSeq: engine.state.actionSeq })
+    await this.publishSnapshots(engine)
+    if (engine.state.terminal) await this.finish(engine)
+  }
+
+  private async publishSnapshots(engine: PokerEngine): Promise<void> {
+    for (const seat of ['A', 'B'] as const) {
+      this.send(engine.state.players[seat].deviceId, 'match.private', engine.snapshot(seat))
+    }
+    this.broadcast(
+      [engine.state.players.A.deviceId, engine.state.players.B.deviceId],
+      'match.public',
+      engine.snapshot(),
+    )
+    if (engine.state.toAct) {
+      const seat = engine.state.toAct
+      this.send(engine.state.players[seat].deviceId, 'match.action_request', {
+        handNo: engine.state.handNo,
+        actionSeq: engine.state.actionSeq,
+        legal: engine.legalActions(),
+        deadlineAt: Date.now() + 60_000,
+      })
+    }
   }
 
   private async finish(engine: PokerEngine): Promise<void> {
-    const terminal = engine.terminal
+    const terminal = engine.state.terminal
     if (!terminal) return
     const grant = await settleMatch(this.store, {
-      matchId: engine.matchId,
+      matchId: engine.state.matchId,
       winnerDeviceId: terminal.winnerDeviceId,
       reason: terminal.reason,
     })
-    const match = (await this.store.getMatch(engine.matchId))!
-    await this.recordEvent(engine.matchId, {
+    const match = (await this.store.getMatch(engine.state.matchId))!
+    await this.recordEvent(engine.state.matchId, {
       type: 'match.end',
       terminal,
       serverSeedHex: match.serverSeedHex,
       grantId: grant?.grantId ?? null,
     })
+    this.broadcast(
+      [engine.state.players.A.deviceId, engine.state.players.B.deviceId],
+      'match.settled',
+      { terminal, grant, serverSeedHex: match.serverSeedHex },
+    )
+    if (grant) this.send(grant.winnerDeviceId, 'grant.updated', grant)
   }
 
   private async recordEvent(matchId: string, payload: unknown): Promise<void> {
     const prev = this.eventHash.get(matchId) ?? genesisHash()
     const hash = nextEventHash(prev, payload)
     const existing = await this.store.listEvents(matchId)
-    await this.store.appendEvent({
-      matchId,
-      seq: existing.length,
-      hash,
-      payload,
-    })
+    await this.store.appendEvent(matchId, existing.length, hash, payload)
     this.eventHash.set(matchId, hash)
+  }
+}
+
+export function serverFrame(type: string, payload: unknown) {
+  return {
+    protocolVersion: PROTOCOL_VERSION,
+    messageId: newMessageId(),
+    sentAt: Date.now(),
+    type,
+    payload,
   }
 }

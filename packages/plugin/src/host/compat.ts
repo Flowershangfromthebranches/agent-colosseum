@@ -9,23 +9,16 @@ export class IncompatibleDshError extends Error {
 }
 
 export function detectDshVersion(): string {
-  const env = process.env.DSH_VERSION ?? process.env.npm_package_version
-  if (env && /^\d+\.\d+\.\d+/.test(env) && env.includes('dsh') === false) {
-    if (env === PINNED_DSH_VERSION) return env
-  }
+  if (process.env.DSH_VERSION === PINNED_DSH_VERSION) return PINNED_DSH_VERSION
   try {
     const require = createRequire(import.meta.url)
     for (const name of ['@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-base', '@deepseek-ai/dsh-agent']) {
       try {
         const pkg = require(`${name}/package.json`) as { version?: string }
         if (pkg.version) return pkg.version
-      } catch {
-        continue
-      }
+      } catch { continue }
     }
-  } catch {
-    // fall through
-  }
+  } catch { /* fall through */ }
   return process.env.DSH_VERSION ?? 'unknown'
 }
 

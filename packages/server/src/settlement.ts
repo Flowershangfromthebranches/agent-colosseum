@@ -1,72 +1,58 @@
-import {
-  DEFAULT_MAX_CALLS,
-  GRANT_ONLINE_TTL_SECONDS,
-  newGrantId,
-  type Grant,
-} from '@agent-colosseum/protocol'
-import type { ArenaStore, GrantRecord, StakeRecord } from './store.ts'
+import { DEFAULT_MAX_CALLS, GRANT_ONLINE_TTL_SECONDS, newGrantId } from '@agent-colosseum/protocol'
+import type { ArenaStore, GrantRecord } from './store.ts'
 
-export interface SettlementInput {
+export async function settleMatch(store: ArenaStore, input: {
   matchId: string
   winnerDeviceId: string | null
-  reason: 'bust' | 'chip_lead' | 'forfeit' | 'double_disconnect' | 'server_fault' | 'draw_released'
-}
-
-export async function settleMatch(store: ArenaStore, input: SettlementInput): Promise<Grant | null> {
-  const first = await store.settleMatch(input.matchId, input.winnerDeviceId)
-  if (!first) return null
+  reason: string
+}): Promise<GrantRecord | null> {
   const stakes = await store.listStakes(input.matchId)
   if (stakes.length !== 2) throw new Error('match must have exactly two stakes')
-
-  if (!input.winnerDeviceId || input.reason === 'double_disconnect' || input.reason === 'server_fault' || input.reason === 'draw_released') {
-    for (const stake of stakes) await store.updateStake(stake.stakeId, 'released')
-    return null
-  }
-
-  let grant: Grant | null = null
-  for (const stake of stakes) {
-    if (stake.spec.ownerDeviceId === input.winnerDeviceId) {
-      await store.updateStake(stake.stakeId, 'unlocked')
-    } else {
-      await store.updateStake(stake.stakeId, 'converted')
-      grant = await convertStake(store, stake, input.winnerDeviceId)
+  const release = !input.winnerDeviceId || input.reason === 'double_disconnect' || input.reason === 'server_fault' || input.reason === 'draw_released'
+  let grant: GrantRecord | undefined
+  const stakeUpdates = stakes.map((stake) => {
+    if (release) return { stakeId: stake.stakeId, status: 'released' as const }
+    if (stake.spec.ownerDeviceId === input.winnerDeviceId) return { stakeId: stake.stakeId, status: 'unlocked' as const }
+    grant = {
+      grantId: newGrantId(),
+      ownerDeviceId: stake.spec.ownerDeviceId,
+      winnerDeviceId: input.winnerDeviceId!,
+      model: stake.spec.model,
+      provider: stake.spec.provider,
+      callsRemaining: DEFAULT_MAX_CALLS,
+      activeConcurrency: 0,
+      onlineMsRemaining: GRANT_ONLINE_TTL_SECONDS * 1000,
+      ownerOnline: false,
+      status: 'active',
+      statusReason: 'active',
+      version: 1,
+      stakeId: stake.stakeId,
+      lastOnlineTickAt: null,
     }
-  }
-  return grant
-}
-
-async function convertStake(store: ArenaStore, stake: StakeRecord, winnerDeviceId: string): Promise<Grant> {
-  const now = Date.now()
-  const record: GrantRecord = {
-    grantId: newGrantId(),
-    ownerDeviceId: stake.spec.ownerDeviceId,
-    winnerDeviceId,
-    model: stake.spec.model,
-    provider: stake.spec.provider,
-    callsRemaining: DEFAULT_MAX_CALLS,
-    onlineMsRemaining: GRANT_ONLINE_TTL_SECONDS * 1000,
-    ownerOnline: false,
-    status: 'active',
-    version: 1,
-    stakeId: stake.stakeId,
-    lastOnlineTickAt: null,
-  }
-  await store.putGrant(record)
-  return record
+    return { stakeId: stake.stakeId, status: 'converted' as const }
+  })
+  const result = await store.settleInTransaction({
+    matchId: input.matchId,
+    winnerDeviceId: input.winnerDeviceId,
+    reason: input.reason,
+    grant,
+    stakeUpdates,
+  })
+  return result.grant
 }
 
 export async function tickGrantOnline(store: ArenaStore, grant: GrantRecord, ownerOnline: boolean, now = Date.now()): Promise<GrantRecord> {
-  if (grant.status !== 'active') {
-    return { ...grant, ownerOnline }
-  }
+  if (grant.status !== 'active') return { ...grant, ownerOnline }
   if (ownerOnline) {
     if (grant.lastOnlineTickAt !== null) {
-      const elapsed = Math.max(0, now - grant.lastOnlineTickAt)
-      grant.onlineMsRemaining = Math.max(0, grant.onlineMsRemaining - elapsed)
+      grant.onlineMsRemaining = Math.max(0, grant.onlineMsRemaining - Math.max(0, now - grant.lastOnlineTickAt))
     }
     grant.lastOnlineTickAt = now
     grant.ownerOnline = true
-    if (grant.onlineMsRemaining === 0) grant.status = 'exhausted'
+    if (grant.onlineMsRemaining === 0) {
+      grant.status = 'exhausted'
+      grant.statusReason = 'ttl_exhausted'
+    }
   } else {
     grant.ownerOnline = false
     grant.lastOnlineTickAt = null
