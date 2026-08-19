@@ -13,6 +13,7 @@ export const rpcEndpoints = [
   'room.leave',
   'match.snapshot',
   'grants.list',
+  'grants.stream',
   'events.poll',
 ] as const
 

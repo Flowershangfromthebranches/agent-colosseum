@@ -1,4 +1,5 @@
-import { PINNED_DSH_VERSION, defaultStakeSpec, uuidv7, type GrantV1, type StakeSpecV1 } from '@agent-colosseum/protocol'
+import { PINNED_DSH_VERSION, PROVIDER_ID, defaultStakeSpec, uuidv7, type GrantV1, type StakeSpecV1 } from '@agent-colosseum/protocol'
+import { ArenaLlmAdapter } from './llm-adapter.ts'
 import { generateDeviceKeypair, signStake, toHex, randomBytes } from '@agent-colosseum/crypto'
 import { ArenaAgentRunner, type AgentsLike } from './agent-runner.ts'
 import { ArenaConnection } from './connection.ts'
@@ -142,6 +143,33 @@ export class ArenaRuntime {
   setGrants(grants: unknown[]) {
     this.store.patch({ grants })
     for (const listener of this.grantListeners) listener()
+  }
+
+  async redeemGrant(grantId: string, prompt = 'hello from winner') {
+    const grant = (this.store.snapshot.grants as GrantV1[]).find((item) => item.grantId === grantId)
+    if (!grant) throw Object.assign(new Error('grant is not active'), { code: 'GRANT_UNAVAILABLE' })
+    const adapter = new ArenaLlmAdapter(
+      () => this.store.snapshot.grants as GrantV1[],
+      (options, item) => this.streamGrant(options, item),
+    )
+    const texts: string[] = []
+    for await (const chunk of adapter.stream({
+      provider: PROVIDER_ID,
+      model: grant.grantId,
+      messages: [prompt],
+    })) {
+      if (chunk.text) texts.push(chunk.text)
+      if (chunk.block?.text) texts.push(chunk.block.text)
+    }
+    return this.store.patch({
+      view: 'relay',
+      relay: {
+        grantId: grant.grantId,
+        status: this.store.snapshot.relay?.status ?? 'completed',
+        text: texts.join(''),
+        ...this.store.snapshot.relay?.error ? { error: this.store.snapshot.relay.error } : {},
+      },
+    })
   }
 
   bindOwner(llm: OwnerLlm, peer: GrantPeer, ledger: GrantLedger): void {

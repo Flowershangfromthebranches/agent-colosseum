@@ -28,9 +28,10 @@ describe('ArenaConnection', () => {
     const sock = new FakeSocket()
     vi.stubGlobal('WebSocket', function WebSocket() { return sock })
     const store = new SnapshotStore()
+    const saved: string[] = []
     const conn = new ArenaConnection('', '', store, {
       async resolve() { return { value: JSON.stringify(generateDeviceKeypair()) } },
-      async set() {},
+      async set(_ref, value) { saved.push(value) },
     })
     await conn.start()
     sock.emit('open')
@@ -39,6 +40,8 @@ describe('ArenaConnection', () => {
     sock.emit('message', JSON.stringify({ type: 'auth.session', payload: { deviceId: '11111111-1111-7111-8111-111111111111' } }))
     await conn.whenReady(50)
     expect(store.snapshot.connectionState).toBe('ready')
+    await Promise.resolve()
+    expect(saved.some((item) => item.includes('11111111-1111-7111-8111-111111111111'))).toBe(true)
     sock.emit('message', JSON.stringify({ type: 'room.created', payload: { roomId: 'r', roomCode: 'ABC234' } }))
     expect(store.snapshot.view).toBe('room')
     sock.emit('message', JSON.stringify({ type: 'room.updated', payload: { roomId: 'r', roomCode: 'ABC234' } }))

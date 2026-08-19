@@ -51,6 +51,7 @@ describe('runtime rpc and grant stream', () => {
     expect((await handleArenaRpc(rt, 'room.leave', {})).ok).toBe(true)
     expect((await handleArenaRpc(rt, 'match.snapshot', {})).ok).toBe(true)
     expect((await handleArenaRpc(rt, 'grants.list', {})).ok).toBe(true)
+    expect((await handleArenaRpc(rt, 'grants.stream', { grantId: 'missing' })).ok).toBe(false)
     expect((await handleArenaRpc(rt, 'events.poll', { cursor: 0, timeoutMs: 1 })).ok).toBe(true)
     expect((await handleArenaRpc(rt, 'nope', {})).ok).toBe(false)
     const local = await handleArenaRpc(rt, 'match.local.start', {
@@ -104,6 +105,9 @@ describe('runtime rpc and grant stream', () => {
     }
     expect(chunks.at(-1)?.type).toBe('finish')
     rt.setGrants([grant])
+    const redeemed = await handleArenaRpc(rt, 'grants.stream', { grantId: grant.grantId, prompt: 'hello from winner' })
+    expect(redeemed.ok).toBe(true)
+    expect((redeemed as { value: { view?: string; relay?: { status?: string } } }).value.view).toBe('relay')
     await rt.dispose()
   })
 

@@ -213,14 +213,24 @@ export class ArenaConnection {
     this.ws?.send(JSON.stringify(frame))
   }
 
+  private async persistIdentity(): Promise<void> {
+    if (!this.keys) return
+    await this.credentials?.set('AGENT_COLOSSEUM_DEVICE_KEYS', JSON.stringify({
+      ...this.keys,
+      ...this.deviceId ? { deviceId: this.deviceId } : {},
+    }))
+  }
+
   private async loadKeys(): Promise<void> {
     const existing = await this.credentials?.resolve('AGENT_COLOSSEUM_DEVICE_KEYS')
     if (existing?.value) {
-      this.keys = JSON.parse(existing.value) as DeviceKeypair
+      const parsed = JSON.parse(existing.value) as DeviceKeypair & { deviceId?: string }
+      this.keys = parsed
+      if (typeof parsed.deviceId === 'string' && parsed.deviceId.includes('-')) this.deviceId = parsed.deviceId
       return
     }
     this.keys = generateDeviceKeypair()
-    await this.credentials?.set('AGENT_COLOSSEUM_DEVICE_KEYS', JSON.stringify(this.keys))
+    await this.persistIdentity()
   }
 
   private connect(): void {
@@ -251,6 +261,7 @@ export class ArenaConnection {
         this.deviceId = String(data.payload.deviceId)
         this.store.patch({ connectionState: 'ready', serverReachable: true, deviceId: this.deviceId })
         this.markReady()
+        void this.persistIdentity()
         return
       }
       if (data.type === 'room.created' || data.type === 'room.updated') {
@@ -286,7 +297,7 @@ export class ArenaConnection {
       }
       if (data.type === 'grant.updated') {
         this.store.patch({
-          view: 'grants',
+          ...this.store.snapshot.view === 'relay' ? {} : { view: 'grants' },
           grants: upsertGrant(this.store.snapshot.grants, data.payload),
           ownerOnline: Boolean((data.payload as { ownerOnline?: boolean }).ownerOnline),
         })

@@ -25,11 +25,7 @@ async function openOverlay(page: Page) {
   await expect(page.getByRole('dialog', { name: 'Agent Colosseum' })).toBeVisible({ timeout: 10_000 })
   const ack = page.getByRole('button', { name: /I understand/ })
   if (await ack.count()) await ack.evaluate((el) => (el as HTMLButtonElement).click())
-  await expect(page.getByRole('heading', { name: /Lobby|Room|Privacy|Grant inventory|Hand|Result/ })).toBeVisible({ timeout: 10_000 })
-}
-
-async function waitHeading(page: Page, name: RegExp, timeout = 90_000) {
-  await expect(page.getByRole('heading', { name })).toBeVisible({ timeout })
+  await expect(page.getByRole('heading', { name: /Lobby|Room|Privacy|Grant inventory|Hand|Result|Relay/ })).toBeVisible({ timeout: 10_000 })
 }
 
 async function goLobby(page: Page) {
@@ -40,8 +36,17 @@ async function goLobby(page: Page) {
   await expect(page.getByRole('heading', { name: 'Lobby' })).toBeVisible({ timeout: 10_000 })
 }
 
+async function waitEither(host: Page, guest: Page, name: RegExp, timeout = 90_000) {
+  const start = Date.now()
+  while (Date.now() - start < timeout) {
+    if (await host.getByRole('heading', { name }).count() || await guest.getByRole('heading', { name }).count()) return
+    await host.waitForTimeout(250)
+  }
+  throw new Error(`missing heading ${name}`)
+}
+
 test('two real DSH web profiles complete friend-room Grant redeem', async ({ browser }) => {
-  test.setTimeout(120_000)
+  test.setTimeout(180_000)
   if (!(await live(hostUrl)) || !(await live(guestUrl))) {
     if (process.env.CI === 'true' && process.env.ARENA_E2E !== '1') test.skip()
     throw new Error(`both DSH web profiles must be up (${hostUrl}, ${guestUrl})`)
@@ -58,6 +63,8 @@ test('two real DSH web profiles complete friend-room Grant redeem', async ({ bro
   await openOverlay(guest)
   await goLobby(host)
   await goLobby(guest)
+  await expect(host.getByRole('dialog', { name: 'Agent Colosseum' }).getByText('ready', { exact: true })).toBeVisible({ timeout: 20_000 })
+  await expect(guest.getByRole('dialog', { name: 'Agent Colosseum' }).getByText('ready', { exact: true })).toBeVisible({ timeout: 20_000 })
 
   await host.getByLabel('Left').selectOption({ value: 'openai-compatible:fold-a' })
   await guest.getByLabel('Left').selectOption({ value: 'openai-compatible:fold-b' })
@@ -79,25 +86,28 @@ test('two real DSH web profiles complete friend-room Grant redeem', async ({ bro
   await host.getByRole('button', { name: 'Accept' }).evaluate((el) => (el as HTMLButtonElement).click())
   await guest.getByRole('button', { name: 'Accept' }).evaluate((el) => (el as HTMLButtonElement).click())
 
-  await Promise.race([
-    waitHeading(host, /Result|Grant inventory|Hand/),
-    waitHeading(guest, /Result|Grant inventory|Hand/),
-  ])
+  await waitEither(host, guest, /^Hand |^Result$|^Grant inventory$/)
+  await host.getByRole('button', { name: 'table', exact: true }).evaluate((el) => (el as HTMLButtonElement).click())
+  await expect(host.getByRole('heading', { name: /^Hand / })).toBeVisible({ timeout: 5_000 })
+  await host.getByRole('button', { name: 'result', exact: true }).evaluate((el) => (el as HTMLButtonElement).click())
+  await expect(host.getByRole('heading', { name: 'Result' })).toBeVisible({ timeout: 5_000 })
+  await expect(host.getByText(/chip_lead|bust|forfeit/i)).toBeVisible()
 
-  const deadline = Date.now() + 90_000
-  while (Date.now() < deadline) {
-    const hostText = await host.getByRole('dialog', { name: 'Agent Colosseum' }).innerText()
-    const guestText = await guest.getByRole('dialog', { name: 'Agent Colosseum' }).innerText()
-    if (/chip_lead|bust|forfeit|Grant inventory|calls remaining|left/i.test(`${hostText}\n${guestText}`)) break
-    const grantsNav = host.getByRole('button', { name: 'grants', exact: true })
-    if (await grantsNav.count()) await grantsNav.evaluate((el) => (el as HTMLButtonElement).click())
-    await host.waitForTimeout(1_000)
-  }
+  await host.getByRole('button', { name: 'grants', exact: true }).evaluate((el) => (el as HTMLButtonElement).click())
+  await guest.getByRole('button', { name: 'grants', exact: true }).evaluate((el) => (el as HTMLButtonElement).click())
+  await expect(host.getByRole('heading', { name: 'Grant inventory' })).toBeVisible()
+  const hostHasGrant = await host.getByText(/left/).count()
+  const guestHasGrant = await guest.getByText(/left/).count()
+  expect(hostHasGrant + guestHasGrant).toBeGreaterThan(0)
 
-  await host.getByRole('button', { name: 'grants', exact: true }).evaluate((el) => (el as HTMLButtonElement).click()).catch(() => undefined)
-  await guest.getByRole('button', { name: 'grants', exact: true }).evaluate((el) => (el as HTMLButtonElement).click()).catch(() => undefined)
-  const combined = `${await host.content()}\n${await guest.content()}`
-  expect(combined).toMatch(/Grant inventory|calls remaining|agent-colosseum|online|unavailable/i)
+  const winner = await host.getByRole('button', { name: 'Stream grant' }).count() ? host : guest
+  await expect(winner.getByRole('button', { name: 'Stream grant' })).toBeVisible()
+  await winner.getByRole('button', { name: 'Stream grant' }).evaluate((el) => (el as HTMLButtonElement).click())
+  await expect.poll(async () => winner.getByRole('dialog', { name: 'Agent Colosseum' }).innerText(), { timeout: 20_000 })
+    .toMatch(/reward-ok|completed| [0-9] left/i)
+  const after = await winner.getByRole('dialog', { name: 'Agent Colosseum' }).innerText()
+  expect(after).toMatch(/reward-ok|completed|[0-9] left/)
+  expect(after).not.toMatch(/10 left/)
 
   await hostCtx.close()
   await guestCtx.close()

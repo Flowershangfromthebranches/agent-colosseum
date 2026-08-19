@@ -24,8 +24,8 @@ export type Snapshot = {
     lastActions?: Array<{ publicRationale?: string }>
   }
   result?: { winner?: string; reason?: string }
-  grants: Array<{ grantId: string; model: string; callsRemaining: number; ownerOnline: boolean; status: string; statusReason?: string; onlineMsRemaining: number }>
-  relay?: { status?: string; error?: string }
+  grants: Array<{ grantId: string; winnerDeviceId?: string; model: string; callsRemaining: number; ownerOnline: boolean; status: string; statusReason?: string; onlineMsRemaining: number }>
+  relay?: { grantId?: string; status?: string; error?: string; text?: string }
 }
 
 type Rpc = { call(channel: string, endpoint: string, payload: unknown): Promise<{ ok: boolean; value?: unknown; error?: { message: string } }> }
@@ -194,7 +194,19 @@ export function ArenaOverlay(props: {
           <h2>Grant inventory</h2>
           {state.grants.length === 0 ? <p>No grants.</p> : (
             <ul>{state.grants.map((grant) => (
-              <li key={grant.grantId}>{grant.model} · {grant.callsRemaining} · {grant.ownerOnline ? 'online' : 'unavailable'} · {grant.statusReason ?? grant.status}</li>
+              <li key={grant.grantId}>
+                {grant.model} · {grant.callsRemaining} left · {grant.ownerOnline ? 'online' : 'unavailable'} · {grant.statusReason ?? grant.status}
+                {grant.winnerDeviceId === state.deviceId && grant.status === 'active' && grant.callsRemaining > 0
+                  ? (
+                    <button
+                      type="button"
+                      onClick={async () => props.onState(await props.call('grants.stream', { grantId: grant.grantId, prompt: 'hello from winner' }) as Snapshot)}
+                    >
+                      Stream grant
+                    </button>
+                  )
+                  : null}
+              </li>
             ))}</ul>
           )}
         </section>
@@ -203,6 +215,7 @@ export function ArenaOverlay(props: {
         <section>
           <h2>Relay</h2>
           <p>{state.relay?.status ?? 'idle'} {state.relay?.error ?? ''}</p>
+          {state.relay?.text ? <p>{state.relay.text}</p> : null}
         </section>
       )}
       <footer style={{ opacity: 0.7, fontSize: 12 }}>Device {state?.deviceId ?? '…'} · DSH {state?.dshVersion} · no cash</footer>

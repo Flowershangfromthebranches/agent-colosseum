@@ -66,7 +66,7 @@ describe('overlay views', () => {
             : {}),
           ...(view === 'result' ? { result: { reason: 'bust', winner: 'w' } } : {}),
           grants: view === 'grants'
-            ? [{ grantId: 'g', model: 'm', callsRemaining: 2, ownerOnline: false, status: 'active', onlineMsRemaining: 1 }]
+            ? [{ grantId: 'g', winnerDeviceId: 'd1', model: 'm', callsRemaining: 2, ownerOnline: true, status: 'active', onlineMsRemaining: 1 }]
             : [],
           ...(view === 'relay' ? { relay: { status: 'started', error: 'x' } } : {}),
         }),

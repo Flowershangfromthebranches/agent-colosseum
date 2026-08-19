@@ -13,7 +13,7 @@
 - [x] Playwright against a live DSH page (Privacy → Lobby → nav)
 - [x] Two plugin-host processes vs live Compose: friend-room → full HU match → Grant → winner streams `agent-colosseum` through the real relay (script adapters)
 - [x] Two real `dsh@0.1.0-rc.7` web profiles install the packed tarball; dump-config includes `# == agent-colosseum`
-- [x] Playwright two-page friend-room on `:3191`/`:3192` against Caddy `wss://localhost:8443` using self-hosted OpenAI-compatible fold models; Grant inventory appears
+- [x] Playwright two-page friend-room on `:3191`/`:3192` against Caddy `wss://localhost:8443` using self-hosted OpenAI-compatible fold models; waits through Table (`Hand`), Result, Grant inventory, then winner Stream grant deducts a call
 - [x] Live Arena restart restores a live match; 89s single disconnect does not forfeit; 90s does; owner-offline TTL pause; reserve replay does not deduct twice
 - [ ] Public ACME TLS on an operator domain/DNS and two headed DSH desktops redeeming with operator-approved vendor models
 

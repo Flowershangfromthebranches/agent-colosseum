@@ -37,6 +37,10 @@ export async function handleArenaRpc(runtime: ArenaRuntime, endpoint: string, pa
         return ok(runtime.store.snapshot)
       case 'grants.list':
         return ok({ grants: runtime.store.snapshot.grants })
+      case 'grants.stream': {
+        const body = payload as { grantId?: string; prompt?: string }
+        return ok(await runtime.redeemGrant(String(body.grantId ?? ''), body.prompt ?? 'hello from winner'))
+      }
       case 'events.poll': {
         const body = payload as { cursor?: number; timeoutMs?: number }
         if ((body.cursor ?? 0) >= runtime.store.version) await runtime.store.wait(body.timeoutMs ?? 15_000)
