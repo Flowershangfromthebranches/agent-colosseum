@@ -55,6 +55,8 @@ describe('ArenaConnection', () => {
     sock.emit('message', JSON.stringify({ type: 'grant.updated', payload: { grantId: 'g', ownerOnline: false, callsRemaining: 9 } }))
     expect((store.snapshot.grants as Array<{ grantId: string }>).map((item) => item.grantId).sort()).toEqual(['g', 'h'])
     sock.emit('message', JSON.stringify({ type: 'relay.abort', payload: { grantId: 'g', inferenceId: 'i' } }))
+    sock.emit('message', JSON.stringify({ type: 'error', payload: { message: 'UNAUTHORIZED' } }))
+    expect(store.snapshot.error).toBe('UNAUTHORIZED')
     conn.stop()
     sock.close()
     vi.unstubAllGlobals()

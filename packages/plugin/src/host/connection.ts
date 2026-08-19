@@ -49,6 +49,7 @@ export class ArenaConnection {
   private readonly ownerAborts = new Map<string, AbortController>()
   private readonly winnerStops = new Set<AbortController>()
   private ready = false
+  private reminted = false
   private readonly readyWaiters: Array<() => void> = []
 
   constructor(
@@ -279,9 +280,20 @@ export class ArenaConnection {
       }
       if (data.type === 'auth.session') {
         this.deviceId = String(data.payload.deviceId)
-        this.store.patch({ connectionState: 'ready', serverReachable: true, deviceId: this.deviceId })
+        this.store.patch({ connectionState: 'ready', serverReachable: true, deviceId: this.deviceId, error: undefined })
         this.markReady()
         void this.persistIdentity()
+        return
+      }
+      if (data.type === 'error') {
+        const message = String(data.payload.message ?? 'error')
+        this.store.patch({ error: message, connectionState: this.ready ? this.store.snapshot.connectionState : 'connecting' })
+        if (!this.deviceId && /UNAUTHORIZED/.test(message) && !this.reminted) {
+          this.reminted = true
+          this.keys = generateDeviceKeypair()
+          void this.persistIdentity()
+          ws.close()
+        }
         return
       }
       if (data.type === 'room.created' || data.type === 'room.updated') {

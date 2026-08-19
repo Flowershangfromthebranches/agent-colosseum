@@ -100,9 +100,12 @@ test('two real DSH web profiles complete friend-room Grant redeem', async ({ bro
   const guestHasGrant = await guest.getByText(/left/).count()
   expect(hostHasGrant + guestHasGrant).toBeGreaterThan(0)
 
-  const winner = await host.getByRole('button', { name: 'Stream grant' }).count() ? host : guest
-  await expect(winner.getByRole('button', { name: 'Stream grant' })).toBeVisible()
-  await winner.getByRole('button', { name: 'Stream grant' }).evaluate((el) => (el as HTMLButtonElement).click())
+  const hostStream = host.getByRole('button', { name: 'Stream grant' })
+  const guestStream = guest.getByRole('button', { name: 'Stream grant' })
+  const winner = await hostStream.count() > 0 ? host : guest
+  const stream = winner.getByRole('button', { name: 'Stream grant' }).first()
+  await expect(stream).toBeVisible()
+  await stream.evaluate((el) => (el as HTMLButtonElement).click())
   await expect.poll(async () => winner.getByRole('dialog', { name: 'Agent Colosseum' }).innerText(), { timeout: 20_000 })
     .toMatch(/reward-ok|completed| [0-9] left/i)
   const after = await winner.getByRole('dialog', { name: 'Agent Colosseum' }).innerText()
