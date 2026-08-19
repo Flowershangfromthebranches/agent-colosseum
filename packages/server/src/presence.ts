@@ -1,8 +1,8 @@
-import { DISCONNECT_FORFEIT_MS, HEARTBEAT_TIMEOUT_MS } from '@agent-colosseum/protocol'
+import { HEARTBEAT_TIMEOUT_MS } from '@agent-colosseum/protocol'
 
 export interface PresenceBook {
   connect(deviceId: string, now?: number): void
-  disconnect(deviceId: string): void
+  disconnect(deviceId: string, now?: number): void
   beat(deviceId: string, now?: number): void
   isOnline(deviceId: string, now?: number): boolean
   offlineSince(deviceId: string, now?: number): number | null
@@ -10,25 +10,29 @@ export interface PresenceBook {
 }
 
 export class MemoryPresence implements PresenceBook {
-  private readonly entries = new Map<string, { lastBeat: number; sockets: number }>()
+  private readonly entries = new Map<string, { lastBeat: number; sockets: number; disconnectedAt: number | null }>()
 
   connect(deviceId: string, now = Date.now()): void {
-    const current = this.entries.get(deviceId) ?? { lastBeat: now, sockets: 0 }
+    const current = this.entries.get(deviceId) ?? { lastBeat: now, sockets: 0, disconnectedAt: null }
     current.sockets += 1
     current.lastBeat = now
+    current.disconnectedAt = null
     this.entries.set(deviceId, current)
   }
 
-  disconnect(deviceId: string): void {
-    const current = this.entries.get(deviceId)
-    if (!current) return
+  disconnect(deviceId: string, now = Date.now()): void {
+    const current = this.entries.get(deviceId) ?? { lastBeat: now, sockets: 0, disconnectedAt: now }
     current.sockets = Math.max(0, current.sockets - 1)
-    if (current.sockets === 0) this.entries.delete(deviceId)
+    if (current.sockets === 0 && current.disconnectedAt === null) current.disconnectedAt = now
+    this.entries.set(deviceId, current)
   }
 
   beat(deviceId: string, now = Date.now()): void {
     const current = this.entries.get(deviceId)
-    if (current) current.lastBeat = now
+    if (current) {
+      current.lastBeat = now
+      if (current.sockets > 0) current.disconnectedAt = null
+    }
   }
 
   isOnline(deviceId: string, now = Date.now()): boolean {
@@ -39,7 +43,9 @@ export class MemoryPresence implements PresenceBook {
   offlineSince(deviceId: string, now = Date.now()): number | null {
     if (this.isOnline(deviceId, now)) return null
     const current = this.entries.get(deviceId)
-    return current ? now - current.lastBeat : DISCONNECT_FORFEIT_MS + 1
+    if (!current) return null
+    if (current.disconnectedAt !== null) return Math.max(0, now - current.disconnectedAt)
+    return Math.max(0, now - current.lastBeat)
   }
 
   socketsOf(deviceId: string): number {

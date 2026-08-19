@@ -1,4 +1,4 @@
-import { PINNED_DSH_VERSION, defaultStakeSpec, uuidv7, type GrantV1 } from '@agent-colosseum/protocol'
+import { PINNED_DSH_VERSION, defaultStakeSpec, uuidv7, type GrantV1, type StakeSpecV1 } from '@agent-colosseum/protocol'
 import { generateDeviceKeypair, signStake, toHex, randomBytes } from '@agent-colosseum/crypto'
 import { ArenaAgentRunner, type AgentsLike } from './agent-runner.ts'
 import { ArenaConnection } from './connection.ts'
@@ -23,6 +23,7 @@ export class ArenaRuntime {
   ownerLlm: OwnerLlm | null = null
   ownerPeer: GrantPeer | null = null
   ledger: GrantLedger | null = null
+  private pendingStake: StakeSpecV1 | null = null
 
   constructor(
     agents: AgentsLike,
@@ -37,7 +38,27 @@ export class ArenaRuntime {
     const version = assertCompatible(this.config.allowUnverifiedDsh)
     this.store.patch({ dshVersion: version, compatible: true })
     this.connection = new ArenaConnection(this.config.serverUrl, this.config.inviteCode, this.store, this.credentials)
+    if (this.ownerLlm) this.connection.ownerLlm = this.ownerLlm
+    this.store.subscribe(() => {
+      for (const listener of this.grantListeners) listener()
+    })
     if (this.config.serverUrl) await this.connection.start()
+  }
+
+  async ensureReady(timeoutMs = 15_000): Promise<void> {
+    if (!this.connection) await this.start()
+    if (this.config.serverUrl) await this.connection?.whenReady(timeoutMs)
+  }
+
+  private signStake(provider: string, model: string): StakeSpecV1 {
+    const keys = this.connection?.keys ?? generateDeviceKeypair()
+    const deviceId = this.store.snapshot.deviceId
+      ?? (this.config.serverUrl ? null : '11111111-1111-7111-8111-111111111111')
+    if (!deviceId) throw new Error('not authenticated')
+    const unsigned = defaultStakeSpec(deviceId, provider, model, toHex(randomBytes(16)), 'pending')
+    const stake = { ...unsigned, signature: signStake(keys.ed25519PrivateKey, unsigned) }
+    this.pendingStake = stake
+    return stake
   }
 
   async bootstrap() {
@@ -74,24 +95,22 @@ export class ArenaRuntime {
   }
 
   async createRoom(provider: string, model: string) {
-    const keys = this.connection?.keys ?? generateDeviceKeypair()
-    const deviceId = this.store.snapshot.deviceId ?? 'pending'
-    const unsigned = defaultStakeSpec(deviceId, provider, model, toHex(randomBytes(16)), 'pending')
-    const stake = { ...unsigned, signature: signStake(keys.ed25519PrivateKey, unsigned) }
+    await this.ensureReady()
+    const stake = this.signStake(provider, model)
     this.connection?.send('room.create', { stake })
     await this.runner.createContestant({ key: 'online', provider, model })
     this.connection?.bindContestant(this.runner, 'online')
+    if (this.config.serverUrl) await this.store.waitUntil((snap) => Boolean(snap.roomCode), 8_000, 'room.create')
     return this.store.patch({ view: 'room' })
   }
 
   async joinRoom(roomCode: string, provider: string, model: string) {
-    const keys = this.connection?.keys ?? generateDeviceKeypair()
-    const deviceId = this.store.snapshot.deviceId ?? 'pending'
-    const unsigned = defaultStakeSpec(deviceId, provider, model, toHex(randomBytes(16)), 'pending')
-    const stake = { ...unsigned, signature: signStake(keys.ed25519PrivateKey, unsigned) }
+    await this.ensureReady()
+    const stake = this.signStake(provider, model)
     this.connection?.send('room.join', { roomCode, stake })
     await this.runner.createContestant({ key: 'online', provider, model })
     this.connection?.bindContestant(this.runner, 'online')
+    if (this.config.serverUrl) await this.store.waitUntil((snap) => Boolean(snap.roomId), 8_000, 'room.join')
     return this.store.patch({ view: 'room', roomCode })
   }
 
@@ -99,10 +118,18 @@ export class ArenaRuntime {
     const roomId = this.store.snapshot.roomId
     if (!roomId) throw new Error('no room')
     const keys = this.connection?.keys ?? generateDeviceKeypair()
-    const deviceId = this.store.snapshot.deviceId ?? 'pending'
-    const model = this.store.snapshot.models[0]
-    const unsigned = defaultStakeSpec(deviceId, model?.provider ?? 'openai-compatible', model?.model ?? 'local', toHex(randomBytes(16)), 'pending')
-    const stake = { ...unsigned, signature: signStake(keys.ed25519PrivateKey, unsigned) }
+    const deviceId = this.store.snapshot.deviceId
+    const stake = this.pendingStake ?? (() => {
+      const model = this.store.snapshot.models[0]
+      const unsigned = defaultStakeSpec(
+        deviceId ?? '11111111-1111-7111-8111-111111111111',
+        model?.provider ?? 'openai-compatible',
+        model?.model ?? 'local',
+        toHex(randomBytes(16)),
+        'pending',
+      )
+      return { ...unsigned, signature: signStake(keys.ed25519PrivateKey, unsigned) }
+    })()
     this.connection?.send('room.accept', { roomId, stake })
     return this.store.snapshot
   }

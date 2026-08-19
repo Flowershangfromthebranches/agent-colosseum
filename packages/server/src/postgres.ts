@@ -109,13 +109,23 @@ export class PostgresStore implements ArenaStore {
     return rows.map(mapMatch)
   }
   async saveMatchState(matchId: string, patch: Partial<MatchRecord>) {
-    const current = await this.getMatch(matchId)
-    if (!current) throw new Error('match not found')
-    const next = { ...current, ...patch }
-    await this.pool.query(
-      `UPDATE matches SET entropy_a=$2, entropy_b=$3, status=$4, state=$5, winner_device_id=$6 WHERE match_id=$1`,
-      [matchId, next.entropyA, next.entropyB, next.status, JSON.stringify(next.state), next.winnerDeviceId],
-    )
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const locked = await client.query('SELECT * FROM matches WHERE match_id = $1 FOR UPDATE', [matchId])
+      if (!locked.rows[0]) throw new Error('match not found')
+      const next = { ...mapMatch(locked.rows[0]), ...patch }
+      await client.query(
+        `UPDATE matches SET entropy_a=$2, entropy_b=$3, status=$4, state=$5, winner_device_id=$6 WHERE match_id=$1`,
+        [matchId, next.entropyA, next.entropyB, next.status, JSON.stringify(next.state), next.winnerDeviceId],
+      )
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
   }
 
   async settleInTransaction(input: {
@@ -181,6 +191,10 @@ export class PostgresStore implements ArenaStore {
   }
   async listGrantsForWinner(deviceId: string) {
     const { rows } = await this.pool.query('SELECT * FROM grants WHERE winner_device_id = $1', [deviceId])
+    return rows.map(mapGrant)
+  }
+  async listGrantsForOwner(deviceId: string) {
+    const { rows } = await this.pool.query('SELECT * FROM grants WHERE owner_device_id = $1', [deviceId])
     return rows.map(mapGrant)
   }
   async saveGrant(grant: GrantRecord) {

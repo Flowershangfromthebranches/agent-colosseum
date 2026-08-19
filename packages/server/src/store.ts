@@ -78,6 +78,7 @@ export interface ArenaStore {
   listStakes(matchId: string): Promise<StakeRecord[]>
   getGrant(grantId: string): Promise<GrantRecord | undefined>
   listGrantsForWinner(deviceId: string): Promise<GrantRecord[]>
+  listGrantsForOwner(deviceId: string): Promise<GrantRecord[]>
   saveGrant(grant: GrantRecord): Promise<void>
   getInference(grantId: string, inferenceId: string): Promise<InferenceCallV1 | undefined>
   insertInference(record: InferenceCallV1): Promise<'created' | 'duplicate'>
@@ -150,9 +151,11 @@ export class MemoryStore implements ArenaStore {
     return [...this.matches.values()].filter((item) => item.status === 'live' || item.status === 'pending_entropy')
   }
   async saveMatchState(matchId: string, patch: Partial<MatchRecord>) {
-    const match = this.matches.get(matchId)
-    if (!match) throw new Error('match not found')
-    Object.assign(match, patch)
+    return this.withLock(matchId, async () => {
+      const match = this.matches.get(matchId)
+      if (!match) throw new Error('match not found')
+      Object.assign(match, patch)
+    })
   }
   async settleInTransaction(input: {
     matchId: string
@@ -187,6 +190,9 @@ export class MemoryStore implements ArenaStore {
   async getGrant(grantId: string) { return this.grants.get(grantId) }
   async listGrantsForWinner(deviceId: string) {
     return [...this.grants.values()].filter((item) => item.winnerDeviceId === deviceId)
+  }
+  async listGrantsForOwner(deviceId: string) {
+    return [...this.grants.values()].filter((item) => item.ownerDeviceId === deviceId)
   }
   async saveGrant(grant: GrantRecord) { this.grants.set(grant.grantId, { ...grant }) }
   async getInference(grantId: string, inferenceId: string) {

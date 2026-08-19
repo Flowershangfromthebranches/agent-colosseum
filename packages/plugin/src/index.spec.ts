@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apply, Config } from './index.ts'
+import { apply, Config, runtimeOf } from './index.ts'
 
 process.env.DSH_VERSION = '0.1.0-rc.7'
 
@@ -50,7 +50,7 @@ describe('host apply', () => {
         const dispose = fn()
         return dispose
       },
-      inject(_deps: string[], callback: (inner: typeof ctx) => void) {
+      inject(_deps: string[], callback: (inner: unknown) => void) {
         callback(ctx)
       },
     }
@@ -60,6 +60,7 @@ describe('host apply', () => {
       return dispose
     }
     apply(ctx as never, { serverUrl: '', inviteCode: '', allowUnverifiedDsh: true })
+    expect(runtimeOf(ctx as object)).toBeTruthy()
     expect(adapters[0]).toContain('agent-colosseum')
     expect(rpcHandler).toBeTypeOf('function')
     const boot = await rpcHandler!('bootstrap', {})

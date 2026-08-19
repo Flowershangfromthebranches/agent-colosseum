@@ -11,7 +11,9 @@
 - [x] Real DSH 0.1.0-rc.7 Loader install into fresh web/desktop profiles (`add -w`); `--dump-config` includes `# == agent-colosseum`; Host boots
 - [x] Docker Compose e2e (Postgres 17 + Redis 7 + production Arena image); `/readyz` is a real DB/Redis ping
 - [x] Playwright against a live DSH page (Privacy → Lobby → nav)
-- [ ] Public TLS (Caddy + operator domain/DNS) and two headed DSH processes completing Grant redeem with real vendor models
+- [x] Two plugin-host processes vs live Compose: friend-room → full HU match → Grant → winner streams `agent-colosseum` through the real relay (script adapters)
+- [x] Live Arena restart restores a live match; 89s single disconnect does not forfeit; 90s does; owner-offline TTL pause; reserve replay does not deduct twice
+- [ ] Public TLS (Caddy + operator domain/DNS) and two headed DSH desktops completing Grant redeem with approved/self-hosted vendor models
 
 ## Human two-person run
 

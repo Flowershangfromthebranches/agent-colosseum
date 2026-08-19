@@ -37,6 +37,7 @@ describe('ArenaConnection', () => {
     expect(sock.sent.some((item) => item.includes('auth.hello'))).toBe(true)
     sock.emit('message', JSON.stringify({ type: 'auth.challenge', payload: { nonce: 'n1' } }))
     sock.emit('message', JSON.stringify({ type: 'auth.session', payload: { deviceId: '11111111-1111-7111-8111-111111111111' } }))
+    await conn.whenReady(50)
     expect(store.snapshot.connectionState).toBe('ready')
     sock.emit('message', JSON.stringify({ type: 'room.created', payload: { roomId: 'r', roomCode: 'ABC234' } }))
     expect(store.snapshot.view).toBe('room')
@@ -46,7 +47,10 @@ describe('ArenaConnection', () => {
     expect(store.snapshot.view).toBe('table')
     sock.emit('message', JSON.stringify({ type: 'match.settled', payload: { terminal: { reason: 'bust', winnerDeviceId: 'w' } } }))
     expect(store.snapshot.view).toBe('result')
-    sock.emit('message', JSON.stringify({ type: 'grant.updated', payload: { grantId: 'g' } }))
+    sock.emit('message', JSON.stringify({ type: 'grant.updated', payload: { grantId: 'g', ownerOnline: true } }))
+    sock.emit('message', JSON.stringify({ type: 'grant.updated', payload: { grantId: 'h', ownerOnline: false } }))
+    sock.emit('message', JSON.stringify({ type: 'grant.updated', payload: { grantId: 'g', ownerOnline: false, callsRemaining: 9 } }))
+    expect((store.snapshot.grants as Array<{ grantId: string }>).map((item) => item.grantId).sort()).toEqual(['g', 'h'])
     sock.emit('message', JSON.stringify({ type: 'relay.abort', payload: { grantId: 'g', inferenceId: 'i' } }))
     conn.stop()
     sock.close()
@@ -184,6 +188,11 @@ describe('ArenaConnection', () => {
     })()
     await Promise.resolve()
     sock.emit('message', JSON.stringify({ type: 'relay.inference_started', payload: {} }))
+    sock.emit('message', JSON.stringify({
+      type: 'relay.chunk',
+      payload: { seq: 1, nonce: '00', ciphertext: '00' },
+    }))
+    sock.emit('message', JSON.stringify({ type: 'relay.terminal', payload: { status: 'completed' } }))
     await started
 
     conn.ownerLlm = {

@@ -77,4 +77,20 @@ export class SnapshotStore {
       })
     })
   }
+
+  waitUntil(pred: (snapshot: ArenaSnapshot) => boolean, timeoutMs: number, label = 'snapshot'): Promise<ArenaSnapshot> {
+    if (pred(this.value)) return Promise.resolve(this.value)
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        off()
+        reject(new Error(`${label} timeout`))
+      }, timeoutMs)
+      const off = this.subscribe((snapshot) => {
+        if (!pred(snapshot)) return
+        clearTimeout(timer)
+        off()
+        resolve(snapshot)
+      })
+    })
+  }
 }

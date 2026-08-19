@@ -44,7 +44,10 @@ export class ArenaConnection {
   private seat: SeatId | null = null
   private matchId: string | null = null
   private readonly waiters = new Map<string, (payload: Record<string, unknown>) => void>()
+  private readonly backlog = new Map<string, Array<{ type: string; payload: Record<string, unknown> }>>()
   private readonly ownerAborts = new Map<string, AbortController>()
+  private ready = false
+  private readonly readyWaiters: Array<() => void> = []
 
   constructor(
     private readonly url: string,
@@ -56,6 +59,22 @@ export class ArenaConnection {
   async start(): Promise<void> {
     await this.loadKeys()
     this.connect()
+  }
+
+  whenReady(timeoutMs = 15_000): Promise<void> {
+    if (this.ready && this.ws?.readyState === 1) return Promise.resolve()
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('auth timeout')), timeoutMs)
+      this.readyWaiters.push(() => {
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+  }
+
+  private markReady(): void {
+    this.ready = true
+    for (const waiter of this.readyWaiters.splice(0)) waiter()
   }
 
   stop(): void {
@@ -153,23 +172,33 @@ export class ArenaConnection {
       blinds: { small: 1, big: 2 },
       lastActions: [],
       terminal: null,
-      ...(this.store.snapshot.match ?? {}),
+      ...this.store.snapshot.match,
       legal,
     }
-    const decided = await this.runner.decide({
-      key: this.agentKey,
-      snapshot,
-      seat: this.seat,
-      hole: this.hole,
-    })
-    this.send('match.action', {
-      matchId: this.matchId,
-      handNo: Number(payload.handNo),
-      actionSeq: Number(payload.actionSeq),
-      action: decided.decision.action,
-      publicRationale: decided.decision.publicRationale,
-      ...decided.decision.raiseTo === undefined ? {} : { raiseTo: decided.decision.raiseTo },
-    })
+    try {
+      const decided = await this.runner.decide({
+        key: this.agentKey,
+        snapshot,
+        seat: this.seat,
+        hole: this.hole,
+      })
+      this.send('match.action', {
+        matchId: this.matchId,
+        handNo: Number(payload.handNo),
+        actionSeq: Number(payload.actionSeq),
+        action: decided.decision.action,
+        publicRationale: decided.decision.publicRationale,
+        ...decided.decision.raiseTo === undefined ? {} : { raiseTo: decided.decision.raiseTo },
+      })
+    } catch {
+      this.send('match.action', {
+        matchId: this.matchId,
+        handNo: Number(payload.handNo),
+        actionSeq: Number(payload.actionSeq),
+        action: 'fold',
+        publicRationale: 'agent_fault: fold',
+      })
+    }
   }
 
   send(type: KnownClientFrame['type'], payload: unknown): void {
@@ -221,6 +250,7 @@ export class ArenaConnection {
       if (data.type === 'auth.session') {
         this.deviceId = String(data.payload.deviceId)
         this.store.patch({ connectionState: 'ready', serverReachable: true, deviceId: this.deviceId })
+        this.markReady()
         return
       }
       if (data.type === 'room.created' || data.type === 'room.updated') {
@@ -255,7 +285,11 @@ export class ArenaConnection {
         return
       }
       if (data.type === 'grant.updated') {
-        this.store.patch({ view: 'grants', grants: [data.payload] })
+        this.store.patch({
+          view: 'grants',
+          grants: upsertGrant(this.store.snapshot.grants, data.payload),
+          ownerOnline: Boolean((data.payload as { ownerOnline?: boolean }).ownerOnline),
+        })
       }
       if (data.type === 'relay.reserve') {
         void this.fulfillAsOwner(data.payload)
@@ -267,9 +301,14 @@ export class ArenaConnection {
       if (waiter) {
         this.waiters.delete(data.type)
         waiter(data.payload)
+      } else if (data.type === 'relay.chunk' || data.type === 'relay.terminal' || data.type === 'relay.inference_started') {
+        const queued = this.backlog.get(data.type) ?? []
+        queued.push({ type: data.type, payload: data.payload })
+        this.backlog.set(data.type, queued)
       }
     })
     ws.addEventListener('close', () => {
+      this.ready = false
       this.store.patch({ connectionState: 'offline', serverReachable: false })
       if (this.closed) return
       const delay = Math.min(15_000, 500 * 2 ** this.attempts)
@@ -283,6 +322,11 @@ export class ArenaConnection {
   }
 
   private waitType(...types: string[]): Promise<{ type: string; payload: Record<string, unknown> }> {
+    for (const type of types) {
+      const queued = this.backlog.get(type)
+      const next = queued?.shift()
+      if (next) return Promise.resolve(next)
+    }
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('relay timeout')), 60_000)
       for (const type of types) {
@@ -332,4 +376,13 @@ export class ArenaConnection {
       this.ownerAborts.delete(`${grantId}:${inferenceId}`)
     }
   }
+}
+
+function upsertGrant(grants: unknown[], grant: unknown): unknown[] {
+  const id = (grant as { grantId?: string }).grantId
+  const next = Array.isArray(grants) ? [...grants] : []
+  const index = next.findIndex((item) => (item as { grantId?: string }).grantId === id)
+  if (index >= 0) next[index] = grant
+  else next.push(grant)
+  return next
 }

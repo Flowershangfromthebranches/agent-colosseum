@@ -146,6 +146,7 @@ describe('PostgresStore', () => {
     expect((await mapped.listStakes(matchId)).length).toBe(1)
     expect(await mapped.getGrant(grantId)).toBeTruthy()
     expect((await mapped.listGrantsForWinner(String(deviceRow.device_id))).length).toBe(1)
+    expect((await mapped.listGrantsForOwner(String(deviceRow.device_id))).length).toBe(1)
     await mapped.saveGrant({
       grantId, ownerDeviceId: String(deviceRow.device_id), winnerDeviceId: String(deviceRow.device_id),
       model: 'm', provider: 'p', callsRemaining: 1, activeConcurrency: 0, onlineMsRemaining: 1,
@@ -210,6 +211,13 @@ describe('PostgresStore', () => {
     await expect(missing.settleInTransaction({
       matchId, winnerDeviceId: null, reason: 'draw_released', stakeUpdates: [],
     })).rejects.toThrow(/match not found/)
+
+    const missingMatch = new PostgresStore(pool((sql) => {
+      if (sql.includes('BEGIN') || sql.includes('ROLLBACK')) return { rows: [] }
+      if (sql.includes('FOR UPDATE')) return { rows: [] }
+      return { rows: [] }
+    }) as never)
+    await expect(missingMatch.saveMatchState(matchId, { status: 'live' })).rejects.toThrow(/match not found/)
   })
 
   it('treats unique inference inserts as duplicates and rethrows other errors', async () => {

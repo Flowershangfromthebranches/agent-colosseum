@@ -33,6 +33,7 @@ describe('memory store extras', () => {
       status: 'active', statusReason: 'active', version: 1, stakeId: 's', lastOnlineTickAt: null,
     })
     expect((await store.listGrantsForWinner(device.deviceId)).length).toBe(1)
+    expect((await store.listGrantsForOwner(device.deviceId)).length).toBe(1)
     await store.appendEvent(matchId, 0, 'h', { type: 'x' })
     expect((await store.listEvents(matchId)).length).toBe(1)
     await expect(store.appendEvent(matchId, 0, 'h', {})).rejects.toThrow(/duplicate/)

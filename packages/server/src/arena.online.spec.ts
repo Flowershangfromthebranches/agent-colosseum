@@ -98,8 +98,55 @@ describe('arena online handle', () => {
     expect(engine.state.handNo).toBeGreaterThan(1)
     expect(engine.state.lastActions.length).toBeGreaterThanOrEqual(0)
     await arena.handle(host.device.deviceId, frame('session.heartbeat', { at: Date.now() }) as never)
+    await arena.timeoutSeat(match.matchId, -1)
     await arena.timeoutSeat(match.matchId)
     await arena.evaluateDisconnect(match.matchId, Date.now() + 200_000)
+  })
+
+  it('sends grant.updated to both winner and owner after a finished match', async () => {
+    const arena = service()
+    const host = await register(arena)
+    const guest = await register(arena)
+    const inbox: Array<{ who: string; type: string }> = []
+    arena.attach(host.device.deviceId, (f) => inbox.push({ who: 'h', type: f.type }))
+    arena.attach(guest.device.deviceId, (f) => inbox.push({ who: 'g', type: f.type }))
+    await arena.handle(host.device.deviceId, frame('room.create', { stake: stake(host.device.deviceId, host.keys, 'm1') }) as never)
+    const room = [...(arena.store as MemoryStore).rooms.values()][0]!
+    await arena.handle(guest.device.deviceId, frame('room.join', {
+      roomCode: room.roomCode, stake: stake(guest.device.deviceId, guest.keys, 'm2'),
+    }) as never)
+    await arena.handle(host.device.deviceId, frame('room.accept', {
+      roomId: room.roomId, stake: stake(host.device.deviceId, host.keys, 'm1'),
+    }) as never)
+    await arena.handle(guest.device.deviceId, frame('room.accept', {
+      roomId: room.roomId, stake: stake(guest.device.deviceId, guest.keys, 'm2'),
+    }) as never)
+    const match = [...(arena.store as MemoryStore).matches.values()][0]!
+    const eA = toHex(randomBytes(32))
+    const eB = toHex(randomBytes(32))
+    await arena.handle(host.device.deviceId, frame('match.entropy', {
+      matchId: match.matchId, entropyHex: eA, signature: signEntropy(host.keys.ed25519PrivateKey, match.matchId, eA),
+    }) as never)
+    await arena.handle(guest.device.deviceId, frame('match.entropy', {
+      matchId: match.matchId, entropyHex: eB, signature: signEntropy(guest.keys.ed25519PrivateKey, match.matchId, eB),
+    }) as never)
+    for (let i = 0; i < 40; i += 1) {
+      const engine = arena.engines.get(match.matchId)
+      if (!engine || engine.state.terminal) break
+      const seat = engine.state.toAct
+      if (!seat) break
+      const deviceId = engine.state.players[seat].deviceId
+      await arena.handle(deviceId, frame('match.action', {
+        matchId: match.matchId,
+        handNo: engine.state.handNo,
+        actionSeq: engine.state.actionSeq,
+        action: 'fold',
+        publicRationale: 'fold',
+      }) as never)
+    }
+    expect(inbox.filter((item) => item.type === 'grant.updated' && item.who === 'h').length).toBeGreaterThan(0)
+    expect(inbox.filter((item) => item.type === 'grant.updated' && item.who === 'g').length).toBeGreaterThan(0)
+    expect(inbox.some((item) => item.type === 'match.settled')).toBe(true)
   })
 
   it('forwards relay frames and rejects replays', async () => {

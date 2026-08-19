@@ -8,6 +8,7 @@ import {
 } from '@agent-colosseum/crypto'
 import { PokerEngine } from '@agent-colosseum/poker'
 import {
+  DECISION_TIMEOUT_MS,
   DISCONNECT_FORFEIT_MS,
   newMatchId,
   newMessageId,
@@ -21,11 +22,12 @@ import {
   type StakeSpecV1,
 } from '@agent-colosseum/protocol'
 import { issueChallenge, redeemDevice, type AuthChallenge } from './auth.ts'
+import { ArenaClocks } from './clocks.ts'
 import { isProviderAllowed, type ServerConfig } from './config.ts'
 import { MemoryPresence, type PresenceBook } from './presence.ts'
 import { RelayController } from './relay.ts'
 import { settleMatch, tickGrantOnline } from './settlement.ts'
-import type { ArenaStore, DeviceRecord, MatchRecord, RoomRecord } from './store.ts'
+import type { ArenaStore, DeviceRecord, GrantRecord, MatchRecord, RoomRecord } from './store.ts'
 
 export type Outbound = { type: string; payload: unknown }
 
@@ -36,6 +38,7 @@ export class ArenaService {
   readonly seen = new Map<string, Set<string>>()
   readonly engines = new Map<string, PokerEngine>()
   readonly challenges = new Map<string, AuthChallenge>()
+  readonly clocks: ArenaClocks
   private eventHash = new Map<string, string>()
 
   constructor(
@@ -45,6 +48,10 @@ export class ArenaService {
   ) {
     this.presence = presence ?? new MemoryPresence()
     this.relay = new RelayController(store)
+    this.clocks = new ArenaClocks({
+      onActionTimeout: (matchId, actionSeq) => { void this.timeoutSeat(matchId, actionSeq) },
+      onDisconnectCheck: (matchId) => { void this.evaluateDisconnect(matchId) },
+    })
   }
 
   issueChallenge(ed25519: string, x25519: string, inviteCode?: string) {
@@ -65,6 +72,7 @@ export class ArenaService {
     set.add(send)
     this.sockets.set(deviceId, set)
     this.presence.connect(deviceId)
+    void this.hydrate(deviceId)
     return () => {
       set.delete(send)
       if (set.size === 0) this.sockets.delete(deviceId)
@@ -93,6 +101,7 @@ export class ArenaService {
     this.presence.beat(deviceId)
     switch (frame.type) {
       case 'session.heartbeat':
+        await this.tickGrantsFor(deviceId)
         return
       case 'room.create': {
         const room = await this.createRoom(deviceId, frame.payload.stake)
@@ -216,16 +225,17 @@ export class ArenaService {
     await this.persistAndPublish(engine)
   }
 
-  async timeoutSeat(matchId: string): Promise<void> {
+  async timeoutSeat(matchId: string, expectedSeq?: number): Promise<void> {
     const engine = this.engines.get(matchId)
     const match = await this.store.getMatch(matchId)
     if (!engine || !match || match.status !== 'live' || !engine.state.toAct) return
+    if (expectedSeq !== undefined && engine.state.actionSeq !== expectedSeq) return
     engine.autoFault(engine.state.toAct)
     await this.persistAndPublish(engine)
   }
 
   async handleDisconnect(deviceId: string, now = Date.now()): Promise<void> {
-    this.presence.disconnect(deviceId)
+    this.presence.disconnect(deviceId, now)
     for (const engine of this.engines.values()) {
       if (engine.state.terminal) continue
       const ids = [engine.state.players.A.deviceId, engine.state.players.B.deviceId]
@@ -233,12 +243,12 @@ export class ArenaService {
       const other = ids.find((id) => id !== deviceId)!
       const selfOff = this.presence.offlineSince(deviceId, now)
       const otherOff = this.presence.offlineSince(other, now)
-      if (selfOff !== null && otherOff !== null) {
-        engine.doubleDisconnect()
+      if (selfOff !== null && selfOff > DISCONNECT_FORFEIT_MS) {
+        if (otherOff !== null) engine.doubleDisconnect()
+        else engine.forfeit(engine.seatOf(deviceId))
         await this.finish(engine)
-      } else if (selfOff !== null && selfOff > DISCONNECT_FORFEIT_MS) {
-        engine.forfeit(engine.seatOf(deviceId))
-        await this.finish(engine)
+      } else if (selfOff !== null) {
+        this.clocks.scheduleDisconnect(engine.state.matchId, DISCONNECT_FORFEIT_MS - selfOff)
       }
     }
   }
@@ -275,7 +285,12 @@ export class ArenaService {
 
   async restoreLive(): Promise<void> {
     for (const match of await this.store.listLiveMatches()) {
-      if (match.state) this.engines.set(match.matchId, PokerEngine.fromState(match.state))
+      if (!match.state) continue
+      const engine = PokerEngine.fromState(match.state)
+      this.engines.set(match.matchId, engine)
+      if (engine.state.toAct && !engine.state.terminal) {
+        this.clocks.scheduleAction(match.matchId, engine.state.actionSeq)
+      }
     }
   }
 
@@ -328,6 +343,7 @@ export class ArenaService {
     this.engines.set(match.matchId, engine)
     await this.store.saveMatchState(match.matchId, { status: 'live', state: engine.toState() })
     await this.publishSnapshots(engine)
+    if (engine.state.toAct) this.clocks.scheduleAction(engine.state.matchId, engine.state.actionSeq, DECISION_TIMEOUT_MS)
   }
 
   private async persistAndPublish(engine: PokerEngine): Promise<void> {
@@ -351,6 +367,8 @@ export class ArenaService {
     await this.recordEvent(engine.state.matchId, { type: 'state', actionSeq: engine.state.actionSeq })
     await this.publishSnapshots(engine)
     if (engine.state.terminal) await this.finish(engine)
+    else if (engine.state.toAct) this.clocks.scheduleAction(engine.state.matchId, engine.state.actionSeq, DECISION_TIMEOUT_MS)
+    else this.clocks.cancelAction(engine.state.matchId)
   }
 
   private async publishSnapshots(engine: PokerEngine): Promise<void> {
@@ -376,6 +394,7 @@ export class ArenaService {
   private async finish(engine: PokerEngine): Promise<void> {
     const terminal = engine.state.terminal
     if (!terminal) return
+    this.clocks.cancelMatch(engine.state.matchId)
     const grant = await settleMatch(this.store, {
       matchId: engine.state.matchId,
       winnerDeviceId: terminal.winnerDeviceId,
@@ -394,11 +413,8 @@ export class ArenaService {
       { terminal, grant, serverSeedHex: match.serverSeedHex },
     )
     if (grant) {
-      const owner = await this.store.getDevice(grant.ownerDeviceId)
-      this.send(grant.winnerDeviceId, 'grant.updated', {
-        ...grant,
-        ownerX25519PublicKey: owner?.x25519PublicKey,
-      })
+      const ticked = await tickGrantOnline(this.store, grant, this.presence.isOnline(grant.ownerDeviceId))
+      await this.publishGrant(ticked)
     }
   }
 
@@ -439,7 +455,7 @@ export class ArenaService {
     const started = await this.relay.start(payload.grantId, payload.inferenceId)
     this.send(grant.winnerDeviceId, 'relay.inference_started', { grantId: payload.grantId, inferenceId: payload.inferenceId })
     this.send(ownerId, 'relay.inference_started', { grantId: payload.grantId, inferenceId: payload.inferenceId })
-    this.send(grant.winnerDeviceId, 'grant.updated', started)
+    await this.publishGrant(started)
   }
 
   private async forwardRelayChunk(fromId: string, payload: {
@@ -467,6 +483,46 @@ export class ArenaService {
     if (fromId === grant.winnerDeviceId && (mapped === 'cancelled' || mapped === 'aborted')) {
       this.send(grant.ownerDeviceId, 'relay.abort', { grantId: payload.grantId, inferenceId: payload.inferenceId })
     }
+  }
+
+  private async hydrate(deviceId: string): Promise<void> {
+    for (const engine of this.engines.values()) {
+      if (engine.state.terminal) continue
+      const ids = [engine.state.players.A.deviceId, engine.state.players.B.deviceId]
+      if (!ids.includes(deviceId)) continue
+      const seat = engine.seatOf(deviceId)
+      this.send(deviceId, 'match.private', engine.snapshot(seat))
+      this.send(deviceId, 'match.public', engine.snapshot())
+      if (engine.state.toAct === seat) {
+        this.send(deviceId, 'match.action_request', {
+          handNo: engine.state.handNo,
+          actionSeq: engine.state.actionSeq,
+          legal: engine.legalActions(),
+          deadlineAt: Date.now() + DECISION_TIMEOUT_MS,
+        })
+      }
+    }
+    await this.tickGrantsFor(deviceId)
+  }
+
+  private async tickGrantsFor(deviceId: string): Promise<void> {
+    const [won, owned] = await Promise.all([
+      this.store.listGrantsForWinner(deviceId),
+      this.store.listGrantsForOwner(deviceId),
+    ])
+    const seen = new Set<string>()
+    for (const grant of [...won, ...owned]) {
+      if (seen.has(grant.grantId)) continue
+      seen.add(grant.grantId)
+      const ticked = await tickGrantOnline(this.store, grant, this.presence.isOnline(grant.ownerDeviceId))
+      await this.publishGrant(ticked)
+    }
+  }
+
+  private async publishGrant(grant: GrantRecord): Promise<void> {
+    const owner = await this.store.getDevice(grant.ownerDeviceId)
+    const payload = { ...grant, ownerX25519PublicKey: owner?.x25519PublicKey }
+    this.broadcast([grant.winnerDeviceId, grant.ownerDeviceId], 'grant.updated', payload)
   }
 
   private async recordEvent(matchId: string, payload: unknown): Promise<void> {
