@@ -6,7 +6,7 @@ import { pokerActionSchema } from './poker-action.ts'
 import { stakeSpecSchema } from './stake.ts'
 
 export const clientFrameBaseSchema = z.object({
-  protocolVersion: z.literal(PROTOCOL_VERSION),
+  protocolVersion: z.number().int(),
   messageId: z.string().uuid(),
   correlationId: z.string().uuid().optional(),
   sentAt: z.number().int(),

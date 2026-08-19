@@ -36,7 +36,7 @@ describe('frames', () => {
       sentAt: 1,
       type: 'session.heartbeat',
       payload: { at: 1 },
-    })).toThrow(/INVALID_FRAME|UNSUPPORTED_VERSION|base validation/)
+    })).toThrow(/unsupported protocolVersion 9/)
 
     expect(() => parseClientFrame({
       protocolVersion: PROTOCOL_VERSION,

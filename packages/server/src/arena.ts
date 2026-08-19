@@ -3,16 +3,12 @@ import {
   deriveHandDeck,
   genesisHash,
   nextEventHash,
-  randomBytes,
-  toHex,
   verifyEntropy,
-  verifyIdentity,
   verifyStake,
 } from '@agent-colosseum/crypto'
 import { PokerEngine } from '@agent-colosseum/poker'
 import {
   DISCONNECT_FORFEIT_MS,
-  newDeviceId,
   newMatchId,
   newMessageId,
   newRoomCode,
@@ -24,8 +20,8 @@ import {
   type PokerActionV1,
   type StakeSpecV1,
 } from '@agent-colosseum/protocol'
+import { issueChallenge, redeemDevice, type AuthChallenge } from './auth.ts'
 import { isProviderAllowed, type ServerConfig } from './config.ts'
-import { sha256Hex } from './hash.ts'
 import { MemoryPresence, type PresenceBook } from './presence.ts'
 import { RelayController } from './relay.ts'
 import { settleMatch, tickGrantOnline } from './settlement.ts'
@@ -39,7 +35,7 @@ export class ArenaService {
   readonly sockets = new Map<string, Set<(frame: Outbound) => void>>()
   readonly seen = new Map<string, Set<string>>()
   readonly engines = new Map<string, PokerEngine>()
-  readonly challenges = new Map<string, { nonce: string; expiresAt: number; ed25519: string; x25519: string; inviteCode?: string }>()
+  readonly challenges = new Map<string, AuthChallenge>()
   private eventHash = new Map<string, string>()
 
   constructor(
@@ -52,10 +48,7 @@ export class ArenaService {
   }
 
   issueChallenge(ed25519: string, x25519: string, inviteCode?: string) {
-    const nonce = toHex(randomBytes(24))
-    const expiresAt = Date.now() + 30_000
-    this.challenges.set(nonce, { nonce, expiresAt, ed25519, x25519, ...inviteCode ? { inviteCode } : {} })
-    return { nonce, expiresAt }
+    return issueChallenge(this.challenges, ed25519, x25519, inviteCode)
   }
 
   async redeem(input: {
@@ -64,39 +57,7 @@ export class ArenaService {
     inviteCode?: string
     deviceId?: string
   }): Promise<DeviceRecord> {
-    const challenge = this.challenges.get(input.nonce)
-    this.challenges.delete(input.nonce)
-    if (!challenge || challenge.expiresAt < Date.now()) throw new Error('challenge expired')
-    const existing = await this.store.findDeviceByEd25519(challenge.ed25519)
-    if (existing) {
-      if (existing.x25519PublicKey !== challenge.x25519) throw new Error('IDENTITY_CONFLICT')
-      if (input.deviceId && input.deviceId !== existing.deviceId) throw new Error('IDENTITY_CONFLICT')
-      if (!verifyIdentity(challenge.ed25519, existing.deviceId, input.nonce, input.signature)) {
-        throw new Error('UNAUTHORIZED')
-      }
-      await this.store.touchDevice(existing.deviceId, Date.now())
-      return existing
-    }
-    const inviteCode = input.inviteCode ?? challenge.inviteCode
-    if (!inviteCode) throw new Error('INVITE_INVALID')
-    if (await this.store.findDeviceByX25519(challenge.x25519)) throw new Error('IDENTITY_CONFLICT')
-    const consumed = await this.store.consumeInvite(sha256Hex(inviteCode))
-    if (!consumed) throw new Error('INVITE_EXHAUSTED')
-    const device: DeviceRecord = {
-      deviceId: newDeviceId(),
-      ed25519PublicKey: challenge.ed25519,
-      x25519PublicKey: challenge.x25519,
-      createdAt: Date.now(),
-      lastSeenAt: Date.now(),
-    }
-    if (!verifyIdentity(challenge.ed25519, device.deviceId, input.nonce, input.signature)
-      && !verifyIdentity(challenge.ed25519, 'pending', input.nonce, input.signature)) {
-      // first-time clients sign the nonce only; bind after assignment
-      const { verifyUtf8 } = await import('@agent-colosseum/crypto')
-      if (!verifyUtf8(challenge.ed25519, input.nonce, input.signature)) throw new Error('UNAUTHORIZED')
-    }
-    await this.store.putDevice(device)
-    return device
+    return redeemDevice(this.store, this.challenges, input)
   }
 
   attach(deviceId: string, send: (frame: Outbound) => void): () => void {

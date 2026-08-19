@@ -135,7 +135,7 @@ export class PokerEngine {
     if (!s.allIn[opponent] && s.players[actor].stack > toCall && maxRaiseTo > s.currentBet) {
       actions.push({
         action: 'raise',
-        minRaiseTo: Math.min(minRaiseTo, maxRaiseTo),
+        minRaiseTo,
         maxRaiseTo,
       })
     }
@@ -152,14 +152,14 @@ export class PokerEngine {
     if (action === 'fold') {
       s.folded[seat] = true
     } else if (action === 'check') {
-      if (s.currentBet !== s.streetCommitted[seat]) throw new Error('cannot check')
+      // legalActions already requires toCall <= 0
     } else if (action === 'call') {
       const toCall = Math.min(s.currentBet - s.streetCommitted[seat], s.players[seat].stack)
       this.commit(seat, toCall)
     } else {
       if (raiseTo === undefined) throw new Error('raise requires raiseTo')
-      const minRaiseTo = allowed.minRaiseTo ?? raiseTo
-      const maxRaiseTo = allowed.maxRaiseTo ?? raiseTo
+      const minRaiseTo = allowed.minRaiseTo!
+      const maxRaiseTo = allowed.maxRaiseTo!
       if (raiseTo > maxRaiseTo) throw new Error('raise exceeds stack')
       const isAllIn = raiseTo === maxRaiseTo
       if (raiseTo < minRaiseTo && !isAllIn) throw new Error('below minimum raise')
@@ -315,7 +315,6 @@ export class PokerEngine {
     this.state.currentBet = 0
     this.state.lastRaiseSize = blindsForHand(this.state.handNo).big
     this.state.actedThisStreet = []
-    const bothAllIn = this.state.allIn.A || this.state.allIn.B
     if (this.state.street === 'preflop') {
       this.burn()
       this.state.board = [this.deal(), this.deal(), this.deal()]
@@ -333,13 +332,11 @@ export class PokerEngine {
       return
     }
     assertUniqueCards([...this.state.holes.A ?? [], ...this.state.holes.B ?? [], ...this.state.board])
-    if (bothAllIn) {
+    if (this.state.allIn.A || this.state.allIn.B) {
       this.runOut()
       return
     }
-    const first = OTHER[this.state.button]
-    this.state.toAct = this.state.allIn[first] ? this.state.button : first
-    if (this.state.allIn.A && this.state.allIn.B) this.runOut()
+    this.state.toAct = OTHER[this.state.button]
   }
 
   private runOut(): void {
@@ -378,7 +375,7 @@ export class PokerEngine {
       const odd = pot - share * 2
       this.state.players.A.stack += share
       this.state.players.B.stack += share
-      if (odd) this.state.players[leftOfButton(this.state.button)].stack += odd
+      this.state.players[leftOfButton(this.state.button)].stack += odd
     } else {
       this.state.players[winners[0]!].stack += pot
     }

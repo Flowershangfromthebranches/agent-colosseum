@@ -68,5 +68,22 @@ describe('hash chain', () => {
     const h1 = nextEventHash(genesisHash(), a)
     expect(verifyEventChain([{ hash: h1, payload: a }])).toBe(true)
     expect(verifyEventChain([{ hash: 'dead', payload: a }])).toBe(false)
+    expect(verifyEventChain([])).toBe(true)
+    expect(nextEventHash(genesisHash(), [1, { z: 1, a: 2 }])).toMatch(/^[0-9a-f]+$/)
+  })
+})
+
+describe('bytes and shuffle guards', () => {
+  it('rejects invalid hex and short decks', async () => {
+    const { fromHex, concatBytes } = await import('./bytes.ts')
+    expect(() => fromHex('zz')).toThrow(/invalid hex/)
+    expect(() => fromHex('abc')).toThrow(/invalid hex/)
+    expect(concatBytes(new Uint8Array([1]), new Uint8Array([2]))[1]).toBe(2)
+    expect(() => dealFromDeck(['As'])).toThrow(/52/)
+    const keys = generateDeviceKeypair()
+    const { signChallenge, verifyChallenge, verifyUtf8 } = await import('./device-keys.ts')
+    expect(verifyUtf8(keys.ed25519PublicKey, 'n', '00')).toBe(false)
+    const sig = signChallenge(keys.ed25519PrivateKey, 'nonce')
+    expect(verifyChallenge(keys.ed25519PublicKey, 'nonce', sig)).toBe(true)
   })
 })

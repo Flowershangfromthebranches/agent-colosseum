@@ -126,6 +126,65 @@ describe('grant relay product path', () => {
     })).toThrow()
   })
 
+  it('rejects a mismatched owner and covers abort/provider terminals', async () => {
+    const store = new MemoryStore()
+    const record = grant(newDeviceId(), newDeviceId())
+    await store.saveGrant({ ...record, stakeId: 's', lastOnlineTickAt: null })
+    await expect(async () => {
+      for await (const _ of streamGrantThroughOwner({
+        grant: record,
+        options: { provider: 'openai-compatible', model: 'owned-model', messages: ['x'] },
+        winner: { deviceId: record.winnerDeviceId, keys: generateDeviceKeypair() },
+        owner: { deviceId: newDeviceId(), keys: generateDeviceKeypair() },
+        ownerLlm: { stream: scriptChunks },
+        ledger: new RelayController(store),
+        ownerOnline: true,
+      })) { /* drain */ }
+    }).rejects.toThrow(/UNAUTHORIZED/)
+
+    const live = grant(newDeviceId(), newDeviceId())
+    await store.saveGrant({ ...live, stakeId: 's2', lastOnlineTickAt: null })
+    const abort = new AbortController()
+    await expect(async () => {
+      for await (const _ of streamGrantThroughOwner({
+        grant: live,
+        options: { provider: 'openai-compatible', model: 'owned-model', messages: ['x'], signal: abort.signal },
+        winner: { deviceId: live.winnerDeviceId, keys: generateDeviceKeypair() },
+        owner: { deviceId: live.ownerDeviceId, keys: generateDeviceKeypair() },
+        ownerLlm: {
+          async * stream() {
+            yield { type: 'text-delta', text: 'x' }
+            abort.abort()
+            throw new Error('provider')
+          },
+        },
+        ledger: new RelayController(store),
+        ownerOnline: true,
+      })) { /* drain */ }
+    }).rejects.toThrow(/provider/)
+
+    const done = grant(newDeviceId(), newDeviceId())
+    await store.saveGrant({ ...done, stakeId: 's3', lastOnlineTickAt: null })
+    const late = new AbortController()
+    const chunks = []
+    for await (const chunk of streamGrantThroughOwner({
+      grant: done,
+      options: { provider: 'openai-compatible', model: 'owned-model', messages: ['x'], signal: late.signal },
+      winner: { deviceId: done.winnerDeviceId, keys: generateDeviceKeypair() },
+      owner: { deviceId: done.ownerDeviceId, keys: generateDeviceKeypair() },
+      ownerLlm: {
+        async * stream() {
+          yield { type: 'text-delta', text: 'x' }
+          late.abort()
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        },
+      },
+      ledger: new RelayController(store),
+      ownerOnline: true,
+    })) chunks.push(chunk)
+    expect(chunks[0]?.type).toBe('text-delta')
+  })
+
   it('refuses explicit maxTokens above 4096', async () => {
     const store = new MemoryStore()
     const ledger = new RelayController(store)

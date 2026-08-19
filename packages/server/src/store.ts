@@ -82,6 +82,7 @@ export interface ArenaStore {
   getInference(grantId: string, inferenceId: string): Promise<InferenceCallV1 | undefined>
   insertInference(record: InferenceCallV1): Promise<'created' | 'duplicate'>
   updateInference(record: InferenceCallV1): Promise<void>
+  deductIfStarted(grantId: string, inferenceId: string): Promise<GrantRecord>
   appendEvent(matchId: string, seq: number, hash: string, payload: unknown): Promise<void>
   listEvents(matchId: string): Promise<Array<{ seq: number; hash: string; payload: unknown }>>
   ping(): Promise<boolean>

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { RPC_CHANNEL } from '@agent-colosseum/protocol'
 
-type Snapshot = {
+export type Snapshot = {
   view: 'privacy' | 'lobby' | 'room' | 'table' | 'result' | 'grants' | 'relay'
   privacyAcknowledged: boolean
   deviceId: string | null
@@ -30,7 +30,7 @@ type Snapshot = {
 
 type Rpc = { call(channel: string, endpoint: string, payload: unknown): Promise<{ ok: boolean; value?: unknown; error?: { message: string } }> }
 
-const clientUi = {
+export const clientUi = {
   open: false,
   listeners: new Set<() => void>(),
   set(open: boolean) {
@@ -72,15 +72,50 @@ export function ArenaApp(props: { rpc: Rpc; wide?: boolean; mode: 'launcher' | '
   }, [open])
 
   if (props.mode === 'launcher') {
-    return (
-      <button type="button" className="ac-open" onClick={() => clientUi.set(true)} style={btn}>
-        {props.wide ? 'Colosseum' : 'AC'}
-      </button>
-    )
+    return <ArenaLauncher {...props.wide === undefined ? {} : { wide: props.wide }} />
   }
 
   if (!open) return null
 
+  return (
+    <ArenaOverlay
+      state={state}
+      error={error}
+      left={left}
+      right={right}
+      roomCode={roomCode}
+      onLeft={setLeft}
+      onRight={setRight}
+      onRoomCode={setRoomCode}
+      onClose={() => clientUi.set(false)}
+      onState={setState}
+      call={call}
+    />
+  )
+}
+
+export function ArenaLauncher(props: { wide?: boolean; onOpen?: () => void }) {
+  return (
+    <button type="button" className="ac-open" onClick={() => (props.onOpen ?? (() => clientUi.set(true)))()} style={btn}>
+      {props.wide ? 'Colosseum' : 'AC'}
+    </button>
+  )
+}
+
+export function ArenaOverlay(props: {
+  state: Snapshot | null
+  error?: string | null
+  left: string
+  right: string
+  roomCode: string
+  onLeft: (value: string) => void
+  onRight: (value: string) => void
+  onRoomCode: (value: string) => void
+  onClose: () => void
+  onState: (state: Snapshot) => void
+  call: (endpoint: string, payload?: unknown) => Promise<unknown>
+}) {
+  const { state, error, left, right, roomCode } = props
   const models = state?.models ?? []
   const parse = (value: string) => {
     const [provider, model] = value.split(':')
@@ -92,14 +127,14 @@ export function ArenaApp(props: { rpc: Rpc; wide?: boolean; mode: 'launcher' | '
       <header style={header}>
         <strong>Agent Colosseum</strong>
         <span>{state?.connectionState ?? 'idle'}</span>
-        <button type="button" onClick={() => clientUi.set(false)}>Close</button>
+        <button type="button" onClick={props.onClose}>Close</button>
       </header>
       {error ? <p role="alert">{error}</p> : null}
       {state?.error ? <p role="alert">{state.error}</p> : null}
       {state && (
         <nav style={nav}>
           {(['lobby', 'room', 'table', 'result', 'grants', 'relay'] as const).map((view) => (
-            <button key={view} type="button" onClick={() => setState({ ...state, view })}>{view}</button>
+            <button key={view} type="button" onClick={() => props.onState({ ...state, view })}>{view}</button>
           ))}
         </nav>
       )}
@@ -107,35 +142,35 @@ export function ArenaApp(props: { rpc: Rpc; wide?: boolean; mode: 'launcher' | '
         <section>
           <h2>Privacy</h2>
           <p>{state.disclosure}</p>
-          <button type="button" onClick={async () => setState(await call('privacy.ack') as Snapshot)}>I understand / 我已了解</button>
+          <button type="button" onClick={async () => props.onState(await props.call('privacy.ack') as Snapshot)}>I understand / 我已了解</button>
         </section>
       )}
       {state?.view === 'lobby' && (
         <section>
           <h2>Lobby</h2>
           <label>Left
-            <select value={left} onChange={(event: { target: { value: string } }) => setLeft(event.target.value)}>
+            <select value={left} onChange={(event: { target: { value: string } }) => props.onLeft(event.target.value)}>
               {models.map((model) => <option key={`l-${model.provider}:${model.model}`} value={`${model.provider}:${model.model}`}>{model.name}</option>)}
             </select>
           </label>
           <label>Right
-            <select value={right} onChange={(event: { target: { value: string } }) => setRight(event.target.value)}>
+            <select value={right} onChange={(event: { target: { value: string } }) => props.onRight(event.target.value)}>
               {models.map((model) => <option key={`r-${model.provider}:${model.model}`} value={`${model.provider}:${model.model}`}>{model.name}</option>)}
             </select>
           </label>
-          <button type="button" onClick={async () => setState(await call('match.local.start', { left: parse(left), right: parse(right) }) as Snapshot)}>Start local match</button>
+          <button type="button" onClick={async () => props.onState(await props.call('match.local.start', { left: parse(left), right: parse(right) }) as Snapshot)}>Start local match</button>
           <h3>Friend room</h3>
-          <button type="button" onClick={async () => setState(await call('room.create', parse(left)) as Snapshot)}>Create room</button>
-          <input aria-label="Room code" value={roomCode} maxLength={6} onChange={(event: { target: { value: string } }) => setRoomCode(event.target.value.toUpperCase())} />
-          <button type="button" onClick={async () => setState(await call('room.join', { roomCode, ...parse(left) }) as Snapshot)}>Join</button>
+          <button type="button" onClick={async () => props.onState(await props.call('room.create', parse(left)) as Snapshot)}>Create room</button>
+          <input aria-label="Room code" value={roomCode} maxLength={6} onChange={(event: { target: { value: string } }) => props.onRoomCode(event.target.value.toUpperCase())} />
+          <button type="button" onClick={async () => props.onState(await props.call('room.join', { roomCode, ...parse(left) }) as Snapshot)}>Join</button>
         </section>
       )}
       {state?.view === 'room' && (
         <section>
           <h2>Room {state.roomCode}</h2>
           <p>Confirm both models and the 10-call stake before accepting.</p>
-          <button type="button" onClick={async () => setState(await call('room.accept') as Snapshot)}>Accept</button>
-          <button type="button" onClick={async () => setState(await call('room.leave') as Snapshot)}>Leave</button>
+          <button type="button" onClick={async () => props.onState(await props.call('room.accept') as Snapshot)}>Accept</button>
+          <button type="button" onClick={async () => props.onState(await props.call('room.leave') as Snapshot)}>Leave</button>
         </section>
       )}
       {state?.view === 'table' && state.match && (

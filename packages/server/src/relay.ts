@@ -1,6 +1,5 @@
 import { MAX_REQUEST_BYTES } from '@agent-colosseum/protocol'
 import type { ArenaStore, GrantRecord } from './store.ts'
-import type { MemoryStore } from './store.ts'
 
 export class RelayController {
   constructor(private readonly store: ArenaStore) {}
@@ -47,25 +46,7 @@ export class RelayController {
   }
 
   async start(grantId: string, inferenceId: string): Promise<GrantRecord> {
-    const memory = this.store as MemoryStore
-    if (typeof memory.deductIfStarted === 'function') {
-      return memory.deductIfStarted(grantId, inferenceId)
-    }
-    const grant = await this.store.getGrant(grantId)
-    const inference = await this.store.getInference(grantId, inferenceId)
-    if (!grant || !inference) throw new Error('missing')
-    if (inference.deducted) return grant
-    if (grant.callsRemaining <= 0) throw new Error('GRANT_EXHAUSTED')
-    if (grant.activeConcurrency >= 1) throw new Error('CONCURRENCY')
-    grant.callsRemaining -= 1
-    grant.activeConcurrency += 1
-    grant.version += 1
-    inference.deducted = true
-    inference.status = 'started'
-    inference.startedAt = Date.now()
-    await this.store.saveGrant(grant)
-    await this.store.updateInference(inference)
-    return grant
+    return this.store.deductIfStarted(grantId, inferenceId)
   }
 
   async terminal(grantId: string, inferenceId: string, status: 'completed' | 'cancelled' | 'provider_error' | 'aborted', reason?: string) {

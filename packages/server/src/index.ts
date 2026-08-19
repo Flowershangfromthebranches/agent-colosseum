@@ -1,4 +1,5 @@
 export * from './config.ts'
+export * from './auth.ts'
 export * from './store.ts'
 export * from './presence.ts'
 export * from './settlement.ts'

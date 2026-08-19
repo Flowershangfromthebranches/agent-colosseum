@@ -56,5 +56,6 @@ describe('ArenaLlmAdapter', () => {
       .toMatchObject({ failure: { code: 'MAX_TOKENS_EXCEEDED' } })
     expect((await collect(adapter, { provider: PROVIDER_ID, model: live.grantId, messages: ['x'.repeat(70_000)] })).at(-1)?.reason)
       .toMatchObject({ failure: { code: 'REQUEST_TOO_LARGE' } })
+    expect((await adapter.resolveModel(PROVIDER_ID, 'missing')).name).toBe('missing')
   })
 })

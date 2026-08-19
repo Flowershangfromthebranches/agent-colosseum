@@ -207,6 +207,52 @@ export class PostgresStore implements ArenaStore {
       throw error
     }
   }
+  async deductIfStarted(grantId: string, inferenceId: string): Promise<GrantRecord> {
+    const client = await this.pool.connect()
+    try {
+      await client.query('BEGIN')
+      const grantRes = await client.query('SELECT * FROM grants WHERE grant_id = $1 FOR UPDATE', [grantId])
+      const infRes = await client.query(
+        'SELECT * FROM inferences WHERE grant_id = $1 AND inference_id = $2 FOR UPDATE',
+        [grantId, inferenceId],
+      )
+      if (!grantRes.rows[0] || !infRes.rows[0]) throw new Error('missing')
+      const grant = mapGrant(grantRes.rows[0])
+      const inference = mapInference(infRes.rows[0])
+      if (inference.deducted) {
+        await client.query('COMMIT')
+        return grant
+      }
+      if (grant.callsRemaining <= 0) throw new Error('GRANT_EXHAUSTED')
+      if (grant.activeConcurrency >= 1) throw new Error('CONCURRENCY')
+      grant.callsRemaining -= 1
+      grant.activeConcurrency += 1
+      grant.version += 1
+      if (grant.callsRemaining === 0) {
+        grant.status = 'exhausted'
+        grant.statusReason = 'calls_exhausted'
+      }
+      inference.deducted = true
+      inference.status = 'started'
+      inference.startedAt = Date.now()
+      await client.query(
+        `UPDATE grants SET calls_remaining=$2, active_concurrency=$3, version=$4, status=$5, status_reason=$6 WHERE grant_id=$1`,
+        [grant.grantId, grant.callsRemaining, grant.activeConcurrency, grant.version, grant.status, grant.statusReason],
+      )
+      await client.query(
+        `UPDATE inferences SET status=$3, deducted=$4, started_at=$5 WHERE grant_id=$1 AND inference_id=$2`,
+        [grantId, inferenceId, inference.status, inference.deducted, inference.startedAt],
+      )
+      await client.query('COMMIT')
+      return grant
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+  }
+
   async updateInference(record: InferenceCallV1) {
     await this.pool.query(
       `UPDATE inferences SET status=$3, deducted=$4, started_at=$5, finished_at=$6, terminal_reason=$7

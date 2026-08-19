@@ -79,6 +79,78 @@ describe('agent runner', () => {
     expect(followed[0]).toMatchObject({ role: 'user', content: [{ type: 'text' }] })
     await runner.dispose('A')
     expect(disposed).toBe(true)
+    await runner.dispose('missing')
+    await expect(runner.decide({
+      key: 'missing',
+      snapshot: engine.snapshot('B'),
+      seat: 'B',
+      hole: engine.state.holes.B!,
+    })).rejects.toThrow(/no contestant/)
+  })
+
+  it('falls back to fold after two invalid outputs and times out', async () => {
+    const handle = scriptHandle([
+      { seq: 1, text: 'not-json' },
+      { seq: 2, text: 'still-bad' },
+    ])
+    const runner = new ArenaAgentRunner({
+      async create() { return handle },
+    }, () => 1)
+    await runner.createContestant({ key: 'A', provider: 'openai-compatible', model: 'm' })
+    const engine = PokerEngine.create({
+      matchId: uuidv7(),
+      deviceA: uuidv7(),
+      deviceB: uuidv7(),
+      deck: deriveHandDeck({
+        matchId: uuidv7(),
+        handNo: 1,
+        serverSeedHex: commitServerSeed().serverSeedHex,
+        playerEntropy: [toHex(randomBytes(32)), toHex(randomBytes(32))],
+      }),
+    })
+    engine.startHand(engine.state.deck)
+    const fault = await runner.decide({
+      key: 'A',
+      snapshot: engine.snapshot(engine.state.toAct!),
+      seat: engine.state.toAct!,
+      hole: engine.state.holes[engine.state.toAct!]!,
+    })
+    expect(fault.fault).toBe('agent_fault')
+    expect(fault.decision.action).toBe('fold')
+
+    const raiseHandle = scriptHandle([
+      { seq: 1, text: '{"action":"raise","raiseTo":4,"publicRationale":"raise"}' },
+    ])
+    const raiseRunner = new ArenaAgentRunner({ async create() { return raiseHandle } })
+    await raiseRunner.createContestant({ key: 'A', provider: 'openai-compatible', model: 'm' })
+    const legal = await raiseRunner.decide({
+      key: 'A',
+      snapshot: {
+        ...engine.snapshot(engine.state.toAct!),
+        legal: [{ action: 'raise', minRaiseTo: 4, maxRaiseTo: 80 }, { action: 'fold' }],
+      },
+      seat: engine.state.toAct!,
+      hole: engine.state.holes[engine.state.toAct!]!,
+    })
+    expect(legal.decision.action).toBe('raise')
+    const illegalRaise = scriptHandle([
+      { seq: 1, text: '{"action":"raise","publicRationale":"x"}' },
+      { seq: 2, text: '{"action":"raise","raiseTo":2,"publicRationale":"x"}' },
+    ])
+    const illegalRunner = new ArenaAgentRunner({ async create() { return illegalRaise } })
+    await illegalRunner.createContestant({ key: 'A', provider: 'openai-compatible', model: 'm' })
+    const bad = await illegalRunner.decide({
+      key: 'A',
+      snapshot: {
+        ...engine.snapshot(engine.state.toAct!),
+        legal: [{ action: 'raise', minRaiseTo: 4, maxRaiseTo: 80 }, { action: 'fold' }],
+      },
+      seat: engine.state.toAct!,
+      hole: engine.state.holes[engine.state.toAct!]!,
+    })
+    expect(bad.fault).toBe('agent_fault')
+    await raiseRunner.dispose()
+    await illegalRunner.dispose()
   })
 })
 
@@ -87,6 +159,8 @@ describe('compat', () => {
     process.env.DSH_VERSION = '0.2.0-rc.0'
     expect(() => assertCompatible(false)).toThrow(IncompatibleDshError)
     expect(assertCompatible(true)).toBe('0.2.0-rc.0')
+    delete process.env.DSH_VERSION
+    expect(assertCompatible(true)).toMatch(/unknown|0\./)
     process.env.DSH_VERSION = '0.1.0-rc.7'
   })
 })

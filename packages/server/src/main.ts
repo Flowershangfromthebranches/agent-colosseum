@@ -22,8 +22,10 @@ export async function migrate(pool: pg.Pool): Promise<void> {
   }
 }
 
-async function main(): Promise<void> {
-  const config = loadConfig()
+export async function startArena(env: NodeJS.ProcessEnv = process.env): Promise<{
+  close(): Promise<void>
+}> {
+  const config = loadConfig(env)
   if (!config.databaseUrl || !config.redisUrl || !config.publicBaseUrl) {
     throw new Error('DATABASE_URL, REDIS_URL and ARENA_PUBLIC_BASE_URL are required')
   }
@@ -45,6 +47,17 @@ async function main(): Promise<void> {
   await app.listen({ host: config.host, port: config.port })
   logJson('info', 'arena.listen', { port: config.port, inviteSeeded: config.inviteHashes.size })
   void sha256Hex
+  return {
+    async close() {
+      await app.close()
+      await pool.end()
+      redis.disconnect()
+    },
+  }
+}
+
+async function main(): Promise<void> {
+  await startArena()
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
