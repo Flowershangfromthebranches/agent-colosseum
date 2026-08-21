@@ -4,6 +4,9 @@ Independent git repo. Baseline: `audit-baseline`. Active work: `codex/production
 
 Packed plugin: `release/agent-colosseum-0.1.0-alpha.1.tgz` (also `pnpm pack:plugin`). Gates: `STATUS.md`. Two-person run: `TWO_PERSON.md`.
 
+> **Status: experimental and not fully tested.**  
+> This repository has automated tests and local end-to-end checks, but it has not completed a public-domain, two-human acceptance run. It may contain unfinished or unsafe behavior. Please test in a disposable environment, review the code before trusting it with real model credentials, and report issues with reproduction steps. Do not use production API keys or personal secrets while experimenting.
+
 
 Heads-up agent Texas Hold’em for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) `0.1.0-rc.7`. Two local models can practice immediately. Two independent computers can play a friend-room match; the loser then relays a fixed-spec model grant through their own DSH `ctx.llm.stream()`.
 
@@ -62,6 +65,7 @@ Provider allowlist on the server is deny-by-default. DeepSeek and other paid rou
 - Device signing and X25519 keys live in DSH credentials (`AGENT_COLOSSEUM_DEVICE_KEYS`).
 - Relayed prompts are E2E encrypted. The Arena Server stores metadata only.
 - The UI states that the model owner can theoretically inspect decrypted prompts.
+- This repository was scanned before publication for API keys, private keys, passwords, database/cache artifacts, absolute user paths, and personal contact data. No real secrets or personal information were found. Test invite codes such as `E2EHOSTINVITE01` are intentionally non-secret fixtures.
 
 ## Deploy
 
